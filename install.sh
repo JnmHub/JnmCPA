@@ -54,6 +54,10 @@ usage() {
   --skip-mongo
   --skip-systemd
   -h, --help
+
+说明:
+  - 脚本运行后会自动安装基础依赖：unzip / ca-certificates（以及缺失时的 curl）
+  - 如果你使用的是 `curl | bash`，机器本身必须先有 curl 才能把脚本拉下来
 EOF
 }
 
@@ -69,6 +73,58 @@ require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
     fail "请使用 root 或 sudo 执行。"
   fi
+}
+
+detect_distro() {
+  if [[ ! -r /etc/os-release ]]; then
+    fail "缺少 /etc/os-release，无法识别系统发行版。"
+  fi
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  printf '%s %s %s\n' "${ID:-}" "${VERSION_ID:-}" "${VERSION_CODENAME:-}"
+}
+
+install_base_packages() {
+  local distro_id="$1"
+
+  case "$distro_id" in
+    ubuntu|debian)
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get install -y curl unzip ca-certificates
+      ;;
+    rhel|centos|rocky|almalinux)
+      if command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl unzip ca-certificates
+      elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl unzip ca-certificates
+      else
+        fail "当前系统没有 dnf/yum，无法自动安装 unzip。"
+      fi
+      ;;
+    *)
+      fail "当前系统 ${distro_id} 不在自动安装依赖支持范围内。"
+      ;;
+  esac
+}
+
+ensure_base_dependencies() {
+  local distro_id="$1"
+  local missing=0
+
+  command -v curl >/dev/null 2>&1 || missing=1
+  command -v unzip >/dev/null 2>&1 || missing=1
+  command -v systemctl >/dev/null 2>&1 || missing=1
+
+  if [[ "$missing" == "0" ]]; then
+    return
+  fi
+
+  info "自动安装基础依赖（curl / unzip / ca-certificates）"
+  install_base_packages "$distro_id"
+
+  command -v curl >/dev/null 2>&1 || fail "自动安装后仍然没有 curl。"
+  command -v unzip >/dev/null 2>&1 || fail "自动安装后仍然没有 unzip。"
+  command -v systemctl >/dev/null 2>&1 || fail "当前系统没有 systemctl，脚本只支持 systemd 服务器。"
 }
 
 detect_linux_platform() {
@@ -143,10 +199,10 @@ done
 
 main() {
   require_root
-  need_command curl "没有检测到 curl，请先安装 curl。"
-  need_command unzip "没有检测到 unzip，请先安装 unzip。"
+  local distro_id version_id codename platform package_path target_dir extracted_dir
+  read -r distro_id version_id codename < <(detect_distro)
+  ensure_base_dependencies "$distro_id"
 
-  local platform package_path target_dir extracted_dir
   platform="$(detect_linux_platform)"
   package_path="$(download_release_package "$platform")"
 

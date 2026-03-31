@@ -10,15 +10,23 @@
 curl -fsSL https://raw.githubusercontent.com/JnmHub/JnmCPA/main/install.sh | bash
 ```
 
+升级代码：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JnmHub/JnmCPA/main/install.sh | bash -s -- --skip-mongo
+```
+
 如果要安装指定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/1546079656/CLIProxyAPI/main/install.sh | CLIPROXY_VERSION=v1.0.0 bash
+curl -fsSL https://raw.githubusercontent.com/JnmHub/JnmCPA/main/install.sh | CLIPROXY_VERSION=cpa bash
 ```
 
 说明：
-- 默认从当前二开仓库 `1546079656/CLIProxyAPI` 下载
+- 默认从当前仓库 `JnmHub/JnmCPA` 下载
 - 只有你显式设置 `CLIPROXY_REPO_OWNER` / `CLIPROXY_REPO_NAME` 时才会改到别的仓库
+- 脚本运行后会自动安装基础依赖：`unzip`、`ca-certificates`
+- 如果你用的是 `curl | bash`，机器本身仍然必须先有 `curl`
 
 ### 0.0.1 服务器一键安装（先上传 zip）
 
