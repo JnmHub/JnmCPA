@@ -22,7 +22,7 @@ cleanup() {
 trap cleanup EXIT
 
 info() {
-  printf '[INFO] %s\n' "$*"
+  printf '[INFO] %s\n' "$*" >&2
 }
 
 warn() {
