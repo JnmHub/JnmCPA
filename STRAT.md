@@ -32,6 +32,16 @@
 - 它会自动识别 Linux 架构并下载：
   - `minimal-linux-amd64.zip`
   - 或 `minimal-linux-arm64.zip`
+- 默认仓库和发布标签是：
+  - `JnmHub/JnmCPA`
+  - `cpa`
+
+对应资产下载路径示例：
+
+```text
+https://github.com/JnmHub/JnmCPA/releases/download/cpa/minimal-linux-amd64.zip
+https://github.com/JnmHub/JnmCPA/releases/download/cpa/minimal-linux-arm64.zip
+```
 
 上传命令：
 
