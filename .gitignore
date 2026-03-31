@@ -1,0 +1,60 @@
+# Binaries
+cli-proxy-api
+*.exe
+
+# Configuration
+/config.yaml
+.env
+
+# Generated content
+bin/*
+dist/*
+logs/*
+mongo-data/*
+conv/*
+temp/*
+refs/*
+.tmp-gocache/*
+.tmp-gomodcache/*
+.tmp-gopath/*
+.tmp-gotmp/*
+tmp*.yaml
+tmp*.json
+
+# Storage backends
+pgstore/*
+gitstore/*
+objectstore/*
+
+# Static assets
+static/Cli-Proxy-API-Management-Center-main/*
+static/.DS_Store
+
+# Authentication data
+auths/*
+!auths/.gitkeep
+
+# Documentation
+docs/*
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Tooling metadata
+.vscode/*
+.codex/*
+.claude/*
+.gemini/*
+.serena/*
+.agent/*
+.agents/*
+.agents/*
+.opencode/*
+.idea/*
+.bmad/*
+_bmad/*
+_bmad-output/*
+
+# macOS
+.DS_Store
+._*

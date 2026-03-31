@@ -1,0 +1,51 @@
+host: "0.0.0.0"
+port: 8317
+
+tls:
+  enable: false
+  cert: ""
+  key: ""
+
+remote-management:
+  allow-remote: true
+  secret-key: "00hhg5210"
+  disable-control-panel: false
+
+auth-dir: "/opt/cliproxyapi/auths"
+
+mongo-store:
+  uri: "mongodb://127.0.0.1:27017"
+  database: "cliproxy"
+  collection: "auth_store"
+
+api-keys:
+  - "00hhg5210"
+
+debug: false
+pprof:
+  enable: false
+  addr: "127.0.0.1:8316"
+
+commercial-mode: false
+logging-to-file: true
+logs-max-total-size-mb: 512
+error-logs-max-files: 10
+usage-statistics-enabled: true
+
+proxy-url: ""
+force-model-prefix: false
+passthrough-headers: false
+
+request-retry: 3
+max-retry-credentials: 0
+max-retry-interval: 30
+
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+
+routing:
+  strategy: "round-robin"
+
+ws-auth: false
+nonstream-keepalive-interval: 0
