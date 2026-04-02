@@ -49,6 +49,10 @@ usage() {
   MONGOSTORE_URI=mongodb://127.0.0.1:27017
   MONGOSTORE_DATABASE=cliproxy
   MONGOSTORE_COLLECTION=auth_store
+  CPA_RESOURCE_KEEP_FREE_PERCENT=9
+  CPA_CPU_QUOTA=182%
+  CPA_MEMORY_MAX=4294967296
+  CPA_GOMEMLIMIT=4080218931
 
 可选参数:
   --skip-mongo
@@ -58,6 +62,7 @@ usage() {
 说明:
   - 脚本运行后会自动安装基础依赖：unzip / ca-certificates（以及缺失时的 curl）
   - 如果你使用的是 `curl | bash`，机器本身必须先有 curl 才能把脚本拉下来
+  - 使用 systemd 安装时，默认会为 CPA 预留 9% 的 CPU 和内存
 EOF
 }
 
@@ -236,6 +241,7 @@ main() {
     (cd "$extracted_dir" && CPA_DEPLOY_DIR="$extracted_dir" CPA_SERVICE_NAME="$SERVICE_NAME" ./install-systemd.sh)
   else
     info "跳过 systemd，直接后台启动"
+    warn "未使用 systemd 时，不会自动应用 CPUQuota / MemoryMax 资源限制。"
     (cd "$extracted_dir" && ./start-cpa.sh start --daemon)
   fi
 

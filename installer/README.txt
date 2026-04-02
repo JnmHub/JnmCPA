@@ -24,6 +24,7 @@
 
 6. install-systemd.sh
    把 /root/minimal-linux-amd64 注册成 systemd 服务
+   默认自动按“保留 9% 资源”限制 CPU 和内存
 
 
 推荐部署步骤
@@ -41,6 +42,10 @@
 
 如果你要改成 systemd 守护：
    sudo ./install-systemd.sh
+
+如果你想自定义资源限制，可以这样：
+   CPA_RESOURCE_KEEP_FREE_PERCENT=15 sudo ./install-systemd.sh
+   CPA_CPU_QUOTA=250% CPA_MEMORY_MAX=4294967296 sudo ./install-systemd.sh
 
 
 常用命令
@@ -63,6 +68,12 @@
 
 注册 systemd：
   sudo ./install-systemd.sh
+
+注册 systemd 并保留 9% 资源给系统：
+  sudo ./install-systemd.sh
+
+注册 systemd 并手动指定资源上限：
+  CPA_CPU_QUOTA=250% CPA_MEMORY_MAX=4294967296 sudo ./install-systemd.sh
 
 查看 systemd 状态：
   systemctl status cliproxyapi

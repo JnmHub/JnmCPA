@@ -27,6 +27,17 @@ curl -fsSL https://raw.githubusercontent.com/JnmHub/JnmCPA/main/install.sh | CLI
 - 只有你显式设置 `CLIPROXY_REPO_OWNER` / `CLIPROXY_REPO_NAME` 时才会改到别的仓库
 - 脚本运行后会自动安装基础依赖：`unzip`、`ca-certificates`
 - 如果你用的是 `curl | bash`，机器本身仍然必须先有 `curl`
+- 默认会在 `systemd` 服务里为 CPA 预留 `9%` 的 CPU 和内存
+
+如果你要自定义资源限制：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JnmHub/JnmCPA/main/install.sh | \
+  CPA_RESOURCE_KEEP_FREE_PERCENT=15 bash
+
+curl -fsSL https://raw.githubusercontent.com/JnmHub/JnmCPA/main/install.sh | \
+  CPA_CPU_QUOTA=250% CPA_MEMORY_MAX=4294967296 bash
+```
 
 ### 0.0.1 服务器一键安装（先上传 zip）
 
