@@ -43,6 +43,10 @@ type ProviderExecutor interface {
 	HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error)
 }
 
+func boolPtr(value bool) *bool {
+	return &value
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)
@@ -66,6 +70,7 @@ const (
 	refreshFailureBackoff = 5 * time.Minute
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
+	autoDeleteTimeout     = 30 * time.Second
 )
 
 type errorCooldownPolicy struct {
@@ -129,6 +134,31 @@ func addCooldown(now time.Time, duration time.Duration) time.Time {
 		return time.Time{}
 	}
 	return now.Add(duration)
+}
+
+func shouldAutoDeleteAuthForStatus(cfg *internalconfig.Config, statusCode int) bool {
+	switch statusCode {
+	case http.StatusUnauthorized:
+		if cfg == nil {
+			return true
+		}
+		return cfg.AuthAutoDelete.Unauthorized
+	case http.StatusTooManyRequests:
+		if cfg == nil {
+			return true
+		}
+		return cfg.AuthAutoDelete.RateLimited
+	default:
+		return false
+	}
+}
+
+func detachedAutoDeleteContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	return context.WithTimeout(base, autoDeleteTimeout)
 }
 
 // Result captures execution outcome used to adjust auth state.
@@ -238,7 +268,16 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		refreshSemaphore: make(chan struct{}, refreshMaxConcurrency),
 	}
 	// atomic.Value requires non-nil initial value.
-	manager.runtimeConfig.Store(&internalconfig.Config{})
+	manager.runtimeConfig.Store(&internalconfig.Config{
+		AuthAutoDelete: internalconfig.AuthAutoDeleteConfig{
+			Unauthorized: true,
+			RateLimited:  true,
+		},
+		AuthProbeBatch: internalconfig.AuthProbeBatchConfig{
+			Concurrency: 1,
+		},
+		RetryModelNotSupported: boolPtr(true),
+	})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
 	return manager
@@ -723,7 +762,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
 			m.MarkResult(ctx, result)
-			if isRequestInvalidError(errStream) {
+			if m.shouldStopRetryForError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -736,7 +775,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				discardStreamChunks(streamResult.Chunks)
 				return nil, errCtx
 			}
-			if isRequestInvalidError(bootstrapErr) {
+			if m.shouldStopRetryForError(bootstrapErr) {
 				rerr := normalizeResultError(bootstrapErr)
 				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
 				result.RetryAfter = retryAfterFromError(bootstrapErr)
@@ -1191,7 +1230,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
-				if isRequestInvalidError(errExec) {
+				if m.shouldStopRetryForError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -1201,7 +1240,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			return resp, nil
 		}
 		if authErr != nil {
-			if isRequestInvalidError(authErr) {
+			if m.shouldStopRetryForError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
@@ -1266,7 +1305,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 					result.RetryAfter = ra
 				}
 				m.MarkResult(execCtx, result)
-				if isRequestInvalidError(errExec) {
+				if m.shouldStopRetryForError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
 				authErr = errExec
@@ -1276,7 +1315,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			return resp, nil
 		}
 		if authErr != nil {
-			if isRequestInvalidError(authErr) {
+			if m.shouldStopRetryForError(authErr) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr
@@ -1337,7 +1376,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			if isRequestInvalidError(errStream) {
+			if m.shouldStopRetryForError(errStream) {
 				return nil, errStream
 			}
 			lastErr = errStream
@@ -1739,7 +1778,7 @@ func (m *Manager) shouldRetryAfterError(err error, attempt int, providers []stri
 	if status := statusCodeFromError(err); status == http.StatusOK {
 		return 0, false
 	}
-	if isRequestInvalidError(err) {
+	if m.shouldStopRetryForError(err) {
 		return 0, false
 	}
 	wait, found := m.closestCooldownWait(providers, model, attempt)
@@ -1770,8 +1809,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	}
 	if !result.Success {
 		statusCode := statusCodeFromResult(result.Error)
-		if statusCode == http.StatusUnauthorized || statusCode == http.StatusTooManyRequests {
-			if err := m.Delete(ctx, result.AuthID); err != nil {
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		if shouldAutoDeleteAuthForStatus(cfg, statusCode) {
+			deleteCtx, cancel := detachedAutoDeleteContext(ctx)
+			defer cancel()
+			if err := m.Delete(deleteCtx, result.AuthID); err != nil {
 				log.WithError(err).Warnf("failed to delete auth %s after HTTP %d", result.AuthID, statusCode)
 			}
 			m.hook.OnResult(ctx, result)
@@ -2232,7 +2274,8 @@ func inferResultErrorCode(err error, status int, message string) string {
 		return "invalid_request_error"
 	case strings.Contains(lower, "stream closed"),
 		strings.Contains(lower, "unexpected eof"),
-		lower == "eof":
+		lower == "eof",
+		strings.HasSuffix(lower, "eof"):
 		return "upstream_closed"
 	}
 
@@ -2402,6 +2445,20 @@ func isRequestInvalidError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func (m *Manager) shouldStopRetryForError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if isRequestInvalidError(err) {
+		return true
+	}
+	if !isModelSupportError(err) {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	return cfg != nil && !cfg.RetryModelNotSupportedEnabled()
 }
 
 func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, policy errorCooldownPolicy) {

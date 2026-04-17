@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -52,5 +53,29 @@ func TestNormalizeResultError_ExtractsStructuredDetails(t *testing.T) {
 	}
 	if normalized.HTTPStatus != http.StatusBadRequest {
 		t.Fatalf("expected http status %d, got %d", http.StatusBadRequest, normalized.HTTPStatus)
+	}
+}
+
+func TestNormalizeResultError_EOFMapsToBadGateway(t *testing.T) {
+	t.Parallel()
+
+	err := &url.Error{
+		Op:  http.MethodPost,
+		URL: "https://chatgpt.com/backend-api/codex/responses",
+		Err: io.EOF,
+	}
+
+	normalized := normalizeResultError(err)
+	if normalized == nil {
+		t.Fatal("expected normalized error")
+	}
+	if normalized.Code != "upstream_closed" {
+		t.Fatalf("expected upstream_closed code, got %q", normalized.Code)
+	}
+	if normalized.HTTPStatus != http.StatusBadGateway {
+		t.Fatalf("expected synthetic status %d, got %d", http.StatusBadGateway, normalized.HTTPStatus)
+	}
+	if !strings.Contains(strings.ToLower(normalized.Message), "eof") {
+		t.Fatalf("expected eof message to be preserved, got %q", normalized.Message)
 	}
 }

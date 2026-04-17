@@ -5,7 +5,12 @@ cli-proxy-api
 # Configuration
 /config.yaml
 .env
-
+.cache
+server
+data/*
+!data/.gitkeep
+tmp.mongo.config.yaml
+tmp.test-*.json
 # Generated content
 bin/*
 dist/*
@@ -26,8 +31,10 @@ pgstore/*
 gitstore/*
 objectstore/*
 
-# Static assets
-static/Cli-Proxy-API-Management-Center-main/*
+# Static assets / frontend workspace
+static/Cli-Proxy-API-Management-Center-main/node_modules/*
+static/Cli-Proxy-API-Management-Center-main/dist/*
+static/Cli-Proxy-API-Management-Center-main/.DS_Store
 static/.DS_Store
 
 # Authentication data
@@ -58,3 +65,4 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+.omx/

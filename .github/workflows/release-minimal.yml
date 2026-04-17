@@ -1,0 +1,76 @@
+name: Release Minimal Packages
+
+on:
+  push:
+    tags:
+      - 'cpa'
+      - 'cpa-*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag name'
+        required: true
+        default: 'cpa'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: static/Cli-Proxy-API-Management-Center-main/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: static/Cli-Proxy-API-Management-Center-main
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: static/Cli-Proxy-API-Management-Center-main
+        run: npm run build
+
+      - name: Sync bundled management page
+        run: cp static/Cli-Proxy-API-Management-Center-main/dist/index.html static/management.html
+
+      - name: Run tests
+        run: |
+          go test ./internal/api/handlers/management ./internal/authdeletestats ./internal/config
+          go test ./sdk/cliproxy/auth
+
+      - name: Build minimal packages
+        run: ./prepare-minimal-package.sh --platform linux-amd64 --platform linux-arm64
+
+      - name: Publish release assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "$RELEASE_TAG" \
+              --notes "Automated minimal package release for ${RELEASE_TAG}" \
+              --latest
+          fi
+          gh release upload "$RELEASE_TAG" \
+            dist/minimal-linux-amd64.zip \
+            dist/minimal-linux-arm64.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber

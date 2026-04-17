@@ -8,26 +8,60 @@ tls:
 
 remote-management:
   allow-remote: true
-  secret-key: "00hhg5210"
+  secret-key: "002003"
+  operator-secret-key: "105626"
+  panel-title: "Jnm 的 CLI Proxy API 管理中心"
   disable-control-panel: false
 
 auth-dir: "/opt/cliproxyapi/auths"
 
+sqlite-store:
+  path: "/opt/cliproxyapi/data/cliproxy.db"
+  poll-interval-seconds: 5
+
 mongo-store:
-  uri: "mongodb://127.0.0.1:27017"
-  database: "cliproxy"
-  collection: "auth_store"
+  uri: ""
+  database: ""
+  collection: ""
 
 api-keys:
-  - "00hhg5210"
+  - "002003"
 
 debug: false
 pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
-commercial-mode: false
-logging-to-file: true
+commercial-mode: true
+auth-auto-delete:
+  status-429: false
+  status-401: true
+
+auth-probe-batch:
+  concurrency: 1
+
+auth-probe-models:
+  codex: gpt-5.4
+error-cooldowns:
+  model-not-supported-seconds: 0
+  rate-limit-base-seconds: 1800
+  rate-limit-max-seconds: 1800
+oauth-excluded-models:
+  codex:
+    - gpt-5
+    - gpt-5-codex
+    - gpt-5-codex-mini
+    - gpt-5.3-codex-spark
+    - gpt-5.1-codex-mini
+    - gpt-5.1-codex-max
+auth-upload:
+  max-json-size-mb: 10
+  max-archive-size-mb: 100
+  max-archive-entries: 10000
+  max-expanded-size-mb: 512
+
+retry-model-not-supported: false
+logging-to-file: false
 logs-max-total-size-mb: 512
 error-logs-max-files: 10
 usage-statistics-enabled: true
@@ -49,3 +83,9 @@ routing:
 
 ws-auth: false
 nonstream-keepalive-interval: 0
+
+error-cooldowns:
+  payment-required-seconds: 0
+  not-found-seconds: 0
+  model-not-supported-seconds: 0
+  transient-error-seconds: 0

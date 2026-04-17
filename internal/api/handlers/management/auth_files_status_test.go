@@ -289,3 +289,54 @@ func TestListAuthFiles_IncludesUsageFlagsForCoolingAndDisabledStates(t *testing.
 		t.Fatalf("expected disabled auth next_retry_after null, got %#v", nextRetry)
 	}
 }
+
+func TestListAuthFiles_ShowsModelLevelRetryTime(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "auth-model-retry",
+		FileName: "auth-model-retry.json",
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": "/tmp/auth-model-retry.json",
+		},
+		ModelStates: map[string]*coreauth.ModelState{
+			"gpt-5.4": {
+				Status:         coreauth.StatusError,
+				Unavailable:    true,
+				NextRetryAfter: time.Now().UTC().Add(10 * time.Minute),
+			},
+		},
+	}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{}, manager)
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected list status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode list payload: %v", err)
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("expected 1 file entry, got %d", len(payload.Files))
+	}
+
+	entry := payload.Files[0]
+	if nextRetry, ok := entry["next_retry_after"].(string); !ok || nextRetry == "" {
+		t.Fatalf("expected model-level next_retry_after string, got %#v", entry["next_retry_after"])
+	}
+}

@@ -2,6 +2,16 @@
 
 这个文件汇总当前项目里可直接使用的启动、构建、打包命令。
 
+```bash
+curl -fsSL https://raw.githubusercontent.com/JnmHub/miniServerAutoRegister/main/install.sh | \
+  bash -s -- \
+    --cpu-quota 50% \
+    --memory-max 50% \
+    --auto-workers
+```
+
+./prepare-minimal-package.sh --skip-build --platform linux-amd64 --platform linux-arm64
+
 ## 0. 命令索引
 
 ### 0.0 远程一键安装
@@ -23,10 +33,13 @@ curl -fsSL https://raw.githubusercontent.com/JnmHub/JnmCPA/main/install.sh | CLI
 ```
 
 说明：
+
 - 默认从当前仓库 `JnmHub/JnmCPA` 下载
 - 只有你显式设置 `CLIPROXY_REPO_OWNER` / `CLIPROXY_REPO_NAME` 时才会改到别的仓库
 - 脚本运行后会自动安装基础依赖：`unzip`、`ca-certificates`
 - 如果你用的是 `curl | bash`，机器本身仍然必须先有 `curl`
+- 当前最小部署包默认启用 `sqlite-store`
+- 安装脚本检测到 `sqlite-store.path` 后，会自动跳过 MongoDB 安装
 - 默认会在 `systemd` 服务里为 CPA 预留 `9%` 的 CPU 和内存
 
 如果你要自定义资源限制：
@@ -139,6 +152,7 @@ Windows PowerShell:
 ## 1. Docker Compose
 
 适合：
+
 - 一条命令启动 `CLIProxyAPI + MongoDB`
 - 本机已经安装 Docker / Docker Desktop
 
@@ -170,12 +184,14 @@ docker compose up -d
 ```
 
 相关文件：
+
 - [docker-compose.yml](/Volumes/Jnm/Code/golang/CLIProxyAPI/docker-compose.yml)
 - [Dockerfile](/Volumes/Jnm/Code/golang/CLIProxyAPI/Dockerfile)
 
 ## 2. Docker 但不依赖 Compose
 
 脚本：
+
 - [docker-run-no-compose.sh](/Volumes/Jnm/Code/golang/CLIProxyAPI/docker-run-no-compose.sh)
 
 可用命令：
@@ -188,6 +204,7 @@ CLI_PROXY_BUILD_LOCAL=1 ./docker-run-no-compose.sh
 ```
 
 说明：
+
 - 默认使用远程镜像 `eceasy/cli-proxy-api:latest`
 - `CLI_PROXY_BUILD_LOCAL=1` 时会先用本地 `Dockerfile` 构建镜像，再启动
 - 只依赖 `docker`，不依赖 `docker compose`
@@ -211,6 +228,7 @@ MONGOSTORE_COLLECTION=auth_store
 ## 3. 完全不依赖 Docker
 
 脚本：
+
 - [start-local-no-docker.sh](/Volumes/Jnm/Code/golang/CLIProxyAPI/start-local-no-docker.sh)
 
 ### 3.1 前台启动
@@ -224,6 +242,7 @@ MONGOSTORE_COLLECTION=auth_store
 ```
 
 说明：
+
 - 默认优先二进制模式
 - 默认平台是 `linux-amd64`
 - 如果指定的平台二进制不存在，会尝试自动构建
@@ -238,6 +257,7 @@ MONGOSTORE_COLLECTION=auth_store
 ```
 
 说明：
+
 - 后台模式会把应用日志写到 `temp/local-run/cliproxy.log`
 - MongoDB 日志写到 `temp/local-run/mongod.log`
 
@@ -250,6 +270,7 @@ MONGOSTORE_COLLECTION=auth_store
 ```
 
 说明：
+
 - 源码模式使用 `go run ./cmd/server -config ./config.yaml`
 - 源码模式一定需要本机安装 Go
 
@@ -265,6 +286,7 @@ MONGOSTORE_COLLECTION=auth_store
 ```
 
 说明：
+
 - `status`：查看 CLIProxyAPI 和 MongoDB 状态
 - `logs`：跟随查看后台日志
 - `stop`：停止后台应用，并尝试停止本脚本拉起的 MongoDB
@@ -298,6 +320,7 @@ CLI_PROXY_USE_GO_RUN=0
 ## 4. 构建全平台二进制
 
 脚本：
+
 - [build-binaries.sh](/Volumes/Jnm/Code/golang/CLIProxyAPI/build-binaries.sh)
 
 可用命令：
@@ -331,6 +354,7 @@ windows-arm64
 ## 5. 打包项目为 ZIP
 
 脚本：
+
 - [package-project-zip.sh](/Volumes/Jnm/Code/golang/CLIProxyAPI/package-project-zip.sh)
 
 可用命令：
@@ -344,6 +368,7 @@ windows-arm64
 ```
 
 说明：
+
 - 默认会先构建全平台二进制，再打包 ZIP
 - 默认包含 `config.yaml`
 - 默认排除前端源码目录 `static/Cli-Proxy-API-Management-Center-main/`
@@ -378,9 +403,11 @@ binaries/windows-arm64/CLIProxyAPI.exe
 ## 6. 服务器安装（Linux / Ubuntu）
 
 脚本：
+
 - [server-install.sh](/Volumes/Jnm/Code/golang/CLIProxyAPI/server-install.sh)
 
 适合：
+
 - 你已经把项目 zip 上传到服务器
 - 服务器是 Ubuntu / Debian / RHEL / Rocky / AlmaLinux
 - 服务器使用 systemd
@@ -410,6 +437,7 @@ sudo ./server-install.sh --help
 ```
 
 脚本行为：
+
 - 自动安装 MongoDB 8.0
 - 自动启用并启动 `mongod`
 - 从 zip 中提取当前 Linux 平台二进制
@@ -431,6 +459,7 @@ journalctl -u cliproxyapi -f
 ## 7. 旧脚本
 
 说明：
+
 - `docker-build.sh` 是交互式脚本
 - 会让你选择“直接用远程镜像启动”或“本地构建后启动”
 - `--with-usage` 会在重建前后导出/恢复 usage 统计

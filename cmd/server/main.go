@@ -13,11 +13,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/authdeletestats"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -131,31 +133,36 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var (
-		useMongoStore           bool
-		envMongoStoreConfigured bool
-		mongoStoreURI           string
-		mongoStoreDatabase      string
-		mongoStoreCollection    string
-		mongoStoreInst          *store.MongoStore
-		usePostgresStore        bool
-		pgStoreDSN              string
-		pgStoreSchema           string
-		pgStoreLocalPath        string
-		pgStoreInst             *store.PostgresStore
-		useGitStore             bool
-		gitStoreRemoteURL       string
-		gitStoreUser            string
-		gitStorePassword        string
-		gitStoreLocalPath       string
-		gitStoreInst            *store.GitTokenStore
-		gitStoreRoot            string
-		useObjectStore          bool
-		objectStoreEndpoint     string
-		objectStoreAccess       string
-		objectStoreSecret       string
-		objectStoreBucket       string
-		objectStoreLocalPath    string
-		objectStoreInst         *store.ObjectTokenStore
+		useSQLiteStore           bool
+		envSQLiteStoreConfigured bool
+		sqliteStorePath          string
+		sqliteStorePollSeconds   int
+		sqliteStoreInst          *store.SQLiteStore
+		useMongoStore            bool
+		envMongoStoreConfigured  bool
+		mongoStoreURI            string
+		mongoStoreDatabase       string
+		mongoStoreCollection     string
+		mongoStoreInst           *store.MongoStore
+		usePostgresStore         bool
+		pgStoreDSN               string
+		pgStoreSchema            string
+		pgStoreLocalPath         string
+		pgStoreInst              *store.PostgresStore
+		useGitStore              bool
+		gitStoreRemoteURL        string
+		gitStoreUser             string
+		gitStorePassword         string
+		gitStoreLocalPath        string
+		gitStoreInst             *store.GitTokenStore
+		gitStoreRoot             string
+		useObjectStore           bool
+		objectStoreEndpoint      string
+		objectStoreAccess        string
+		objectStoreSecret        string
+		objectStoreBucket        string
+		objectStoreLocalPath     string
+		objectStoreInst          *store.ObjectTokenStore
 	)
 
 	wd, err := os.Getwd()
@@ -182,6 +189,15 @@ func main() {
 		return "", false
 	}
 	writableBase := util.WritablePath()
+	if value, ok := lookupEnv("SQLITESTORE_PATH", "sqlite_store_path"); ok {
+		envSQLiteStoreConfigured = true
+		sqliteStorePath = value
+	}
+	if value, ok := lookupEnv("SQLITESTORE_POLL_INTERVAL_SECONDS", "sqlite_store_poll_interval_seconds"); ok {
+		if parsed, errParse := strconv.Atoi(value); errParse == nil && parsed >= 0 {
+			sqliteStorePollSeconds = parsed
+		}
+	}
 	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
 		usePostgresStore = true
 		pgStoreDSN = value
@@ -197,6 +213,11 @@ func main() {
 	if value, ok := lookupEnv("MONGOSTORE_COLLECTION", "mongostore_collection", "MONGO_COLLECTION", "mongo_collection"); ok {
 		envMongoStoreConfigured = true
 		mongoStoreCollection = value
+	}
+	if envSQLiteStoreConfigured {
+		usePostgresStore = false
+		useGitStore = false
+		useObjectStore = false
 	}
 	if envMongoStoreConfigured {
 		usePostgresStore = false
@@ -460,19 +481,46 @@ func main() {
 		cfg.AuthDir = resolvedAuthDir
 	}
 
+	effectiveSQLitePath := strings.TrimSpace(cfg.SQLiteStore.Path)
 	effectiveMongoURI := strings.TrimSpace(cfg.MongoStore.URI)
 	effectiveMongoDatabase := strings.TrimSpace(cfg.MongoStore.Database)
 	effectiveMongoCollection := strings.TrimSpace(cfg.MongoStore.Collection)
-	if mongoStoreURI != "" {
-		effectiveMongoURI = mongoStoreURI
+	effectiveSQLitePollInterval := time.Duration(cfg.SQLiteStore.PollIntervalSeconds) * time.Second
+	if sqliteStorePath != "" {
+		effectiveSQLitePath = sqliteStorePath
 	}
-	if mongoStoreDatabase != "" {
-		effectiveMongoDatabase = mongoStoreDatabase
+	if sqliteStorePollSeconds > 0 {
+		effectiveSQLitePollInterval = time.Duration(sqliteStorePollSeconds) * time.Second
 	}
-	if mongoStoreCollection != "" {
-		effectiveMongoCollection = mongoStoreCollection
+	useSQLiteStore = effectiveSQLitePath != ""
+	if useSQLiteStore {
+		usePostgresStore = false
+		useGitStore = false
+		useObjectStore = false
+		useMongoStore = false
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		sqliteStoreInst, err = store.NewSQLiteStore(ctx, store.SQLiteStoreConfig{
+			Path:         effectiveSQLitePath,
+			PollInterval: effectiveSQLitePollInterval,
+		})
+		cancel()
+		if err != nil {
+			log.Errorf("failed to initialize sqlite token store: %v", err)
+			return
+		}
+		log.Infof("sqlite-backed token store enabled, database path: %s", effectiveSQLitePath)
+	} else {
+		if mongoStoreURI != "" {
+			effectiveMongoURI = mongoStoreURI
+		}
+		if mongoStoreDatabase != "" {
+			effectiveMongoDatabase = mongoStoreDatabase
+		}
+		if mongoStoreCollection != "" {
+			effectiveMongoCollection = mongoStoreCollection
+		}
+		useMongoStore = effectiveMongoURI != "" || effectiveMongoDatabase != "" || effectiveMongoCollection != ""
 	}
-	useMongoStore = effectiveMongoURI != "" || effectiveMongoDatabase != "" || effectiveMongoCollection != ""
 	if useMongoStore {
 		usePostgresStore = false
 		useGitStore = false
@@ -489,6 +537,15 @@ func main() {
 			return
 		}
 	}
+	statsSQLitePath := filepath.Join(filepath.Dir(configFilePath), "data", "auth-delete-stats.db")
+	if strings.TrimSpace(effectiveSQLitePath) != "" {
+		statsSQLitePath = filepath.Join(filepath.Dir(effectiveSQLitePath), "auth-delete-stats.db")
+	}
+	if errStats := authdeletestats.DefaultManager().ConfigureSQLite(statsSQLitePath); errStats != nil {
+		log.WithError(errStats).Warn("failed to enable sqlite-backed auth delete statistics; falling back to in-memory buckets")
+	} else {
+		log.Infof("auth delete statistics sqlite enabled: %s", statsSQLitePath)
+	}
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
@@ -500,6 +557,8 @@ func main() {
 	// Register the shared token store once so all components use the same persistence backend.
 	if usePostgresStore {
 		sdkAuth.RegisterTokenStore(pgStoreInst)
+	} else if useSQLiteStore {
+		sdkAuth.RegisterTokenStore(sqliteStoreInst)
 	} else if useMongoStore {
 		sdkAuth.RegisterTokenStore(mongoStoreInst)
 	} else if useObjectStore {

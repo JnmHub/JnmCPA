@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/authdeletestats"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -29,6 +30,15 @@ type attemptInfo struct {
 	lastActivity time.Time // track last activity for cleanup
 }
 
+type managementRole string
+
+const (
+	managementRoleSuperAdmin   managementRole = "super_admin"
+	managementRoleFileOperator managementRole = "file_operator"
+)
+
+const managementRoleContextKey = "management_role"
+
 // attemptCleanupInterval controls how often stale IP entries are purged
 const attemptCleanupInterval = 1 * time.Hour
 
@@ -37,26 +47,39 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	runtimeAuthHook     func(context.Context, watcher.AuthUpdate)
+	cfg                      *config.Config
+	configFilePath           string
+	mu                       sync.Mutex
+	attemptsMu               sync.Mutex
+	failedAttempts           map[string]*attemptInfo // keyed by client IP
+	authManager              *coreauth.Manager
+	usageStats               *usage.RequestStatistics
+	authDeleteStats          *authdeletestats.Manager
+	authProbeBatchWorkerOnce sync.Once
+	authProbeBatchMu         sync.RWMutex
+	authProbeBatchQueue      chan authProbeBatchQueueItem
+	authProbeBatchJobs       map[string]*authProbeBatchJob
+	tokenStore               coreauth.Store
+	localPassword            string
+	allowRemoteOverride      bool
+	envSecret                string
+	envOperatorSecret        string
+	logDir                   string
+	postAuthHook             coreauth.PostAuthHook
+	runtimeAuthHook          func(context.Context, watcher.AuthUpdate)
 }
 
 // NewHandler creates a new management handler instance.
 func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Manager) *Handler {
 	envSecret, _ := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
+	envOperatorSecret, _ := os.LookupEnv("MANAGEMENT_OPERATOR_PASSWORD")
+	envOperatorSecret = strings.TrimSpace(envOperatorSecret)
+	if envOperatorSecret == "" {
+		if fallback, ok := os.LookupEnv("MANAGEMENT_FILE_OPERATOR_PASSWORD"); ok {
+			envOperatorSecret = strings.TrimSpace(fallback)
+		}
+	}
 
 	h := &Handler{
 		cfg:                 cfg,
@@ -64,9 +87,11 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		failedAttempts:      make(map[string]*attemptInfo),
 		authManager:         manager,
 		usageStats:          usage.GetRequestStatistics(),
+		authDeleteStats:     authdeletestats.DefaultManager(),
 		tokenStore:          sdkAuth.GetTokenStore(),
-		allowRemoteOverride: envSecret != "",
+		allowRemoteOverride: envSecret != "" || envOperatorSecret != "",
 		envSecret:           envSecret,
+		envOperatorSecret:   envOperatorSecret,
 	}
 	h.startAttemptCleanup()
 	return h
@@ -116,6 +141,9 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = ma
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
 
+// SetAuthDeleteStatistics allows replacing the auth delete statistics reference.
+func (h *Handler) SetAuthDeleteStatistics(stats *authdeletestats.Manager) { h.authDeleteStats = stats }
+
 // SetLocalPassword configures the runtime-local password accepted for localhost requests.
 func (h *Handler) SetLocalPassword(password string) { h.localPassword = password }
 
@@ -142,6 +170,37 @@ func (h *Handler) SetRuntimeAuthHook(hook func(context.Context, watcher.AuthUpda
 	h.runtimeAuthHook = hook
 }
 
+// RequireRoles ensures the authenticated management key has one of the allowed roles.
+func (h *Handler) RequireRoles(roles ...string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		if trimmed := strings.TrimSpace(role); trimmed != "" {
+			allowed[trimmed] = struct{}{}
+		}
+	}
+	return func(c *gin.Context) {
+		role := CurrentManagementRole(c)
+		if _, ok := allowed[role]; ok {
+			c.Next()
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient management permissions"})
+	}
+}
+
+// CurrentManagementRole returns the authenticated management role stored in the Gin context.
+func CurrentManagementRole(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	value, ok := c.Get(managementRoleContextKey)
+	if !ok {
+		return ""
+	}
+	role, _ := value.(string)
+	return strings.TrimSpace(role)
+}
+
 // Middleware enforces access control for management endpoints.
 // All requests (local and remote) require a valid management key.
 // Additionally, remote access requires allow-remote-management=true.
@@ -158,17 +217,20 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
 		cfg := h.cfg
 		var (
-			allowRemote bool
-			secretHash  string
+			allowRemote        bool
+			secretHash         string
+			operatorSecretHash string
 		)
 		if cfg != nil {
 			allowRemote = cfg.RemoteManagement.AllowRemote
 			secretHash = cfg.RemoteManagement.SecretKey
+			operatorSecretHash = cfg.RemoteManagement.OperatorSecretKey
 		}
 		if h.allowRemoteOverride {
 			allowRemote = true
 		}
 		envSecret := h.envSecret
+		envOperatorSecret := h.envOperatorSecret
 
 		fail := func() {}
 		if !localClient {
@@ -210,7 +272,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				h.attemptsMu.Unlock()
 			}
 		}
-		if secretHash == "" && envSecret == "" {
+		if secretHash == "" && envSecret == "" && operatorSecretHash == "" && envOperatorSecret == "" {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "remote management key not set"})
 			return
 		}
@@ -240,6 +302,7 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		if localClient {
 			if lp := h.localPassword; lp != "" {
 				if subtle.ConstantTimeCompare([]byte(provided), []byte(lp)) == 1 {
+					c.Set(managementRoleContextKey, string(managementRoleSuperAdmin))
 					c.Next()
 					return
 				}
@@ -255,28 +318,58 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 				}
 				h.attemptsMu.Unlock()
 			}
+			c.Set(managementRoleContextKey, string(managementRoleSuperAdmin))
 			c.Next()
 			return
 		}
 
-		if secretHash == "" || bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) != nil {
+		if secretHash != "" && bcrypt.CompareHashAndPassword([]byte(secretHash), []byte(provided)) == nil {
 			if !localClient {
-				fail()
+				h.attemptsMu.Lock()
+				if ai := h.failedAttempts[clientIP]; ai != nil {
+					ai.count = 0
+					ai.blockedUntil = time.Time{}
+				}
+				h.attemptsMu.Unlock()
 			}
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
+			c.Set(managementRoleContextKey, string(managementRoleSuperAdmin))
+			c.Next()
+			return
+		}
+
+		if envOperatorSecret != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(envOperatorSecret)) == 1 {
+			if !localClient {
+				h.attemptsMu.Lock()
+				if ai := h.failedAttempts[clientIP]; ai != nil {
+					ai.count = 0
+					ai.blockedUntil = time.Time{}
+				}
+				h.attemptsMu.Unlock()
+			}
+			c.Set(managementRoleContextKey, string(managementRoleFileOperator))
+			c.Next()
+			return
+		}
+
+		if operatorSecretHash != "" && bcrypt.CompareHashAndPassword([]byte(operatorSecretHash), []byte(provided)) == nil {
+			if !localClient {
+				h.attemptsMu.Lock()
+				if ai := h.failedAttempts[clientIP]; ai != nil {
+					ai.count = 0
+					ai.blockedUntil = time.Time{}
+				}
+				h.attemptsMu.Unlock()
+			}
+			c.Set(managementRoleContextKey, string(managementRoleFileOperator))
+			c.Next()
 			return
 		}
 
 		if !localClient {
-			h.attemptsMu.Lock()
-			if ai := h.failedAttempts[clientIP]; ai != nil {
-				ai.count = 0
-				ai.blockedUntil = time.Time{}
-			}
-			h.attemptsMu.Unlock()
+			fail()
 		}
 
-		c.Next()
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid management key"})
 	}
 }
 

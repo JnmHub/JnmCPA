@@ -45,6 +45,9 @@ type Config struct {
 	// MongoStore configures MongoDB-backed auth persistence.
 	MongoStore MongoStoreConfig `yaml:"mongo-store" json:"mongo-store"`
 
+	// SQLiteStore configures SQLite-backed auth persistence.
+	SQLiteStore SQLiteStoreConfig `yaml:"sqlite-store" json:"sqlite-store"`
+
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 
@@ -71,6 +74,18 @@ type Config struct {
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
+	// AuthAutoDelete controls whether specific upstream failures should hard-delete auths.
+	AuthAutoDelete AuthAutoDeleteConfig `yaml:"auth-auto-delete" json:"auth-auto-delete"`
+
+	// AuthProbeBatch controls queued batch-probe behavior from management actions.
+	AuthProbeBatch AuthProbeBatchConfig `yaml:"auth-probe-batch" json:"auth-probe-batch"`
+
+	// AuthProbeModels defines per-provider default models used by management auth probe requests.
+	AuthProbeModels map[string]string `yaml:"auth-probe-models,omitempty" json:"auth-probe-models,omitempty"`
+
+	// AuthUpload controls auth file upload size and archive limits.
+	AuthUpload AuthUploadConfig `yaml:"auth-upload" json:"auth-upload"`
+
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
@@ -78,6 +93,9 @@ type Config struct {
 	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
+	// RetryModelNotSupported controls whether 400/422 "model not supported" errors should fall through to other auths.
+	// Nil defaults to true to preserve legacy behavior.
+	RetryModelNotSupported *bool `yaml:"retry-model-not-supported,omitempty" json:"retry-model-not-supported,omitempty"`
 
 	// ErrorCooldowns defines status-specific cooldown durations in seconds.
 	// Leave fields unset to use built-in defaults; set to 0 to disable cooldown for that category.
@@ -183,6 +201,11 @@ type RemoteManagement struct {
 	AllowRemote bool `yaml:"allow-remote"`
 	// SecretKey is the management key (plaintext or bcrypt hashed). YAML key intentionally 'secret-key'.
 	SecretKey string `yaml:"secret-key"`
+	// OperatorSecretKey is the limited management key for file operators.
+	// It allows uploading auth files and reading auth file count statistics.
+	OperatorSecretKey string `yaml:"operator-secret-key"`
+	// PanelTitle overrides the browser page title for the management control panel.
+	PanelTitle string `yaml:"panel-title"`
 	// DisableControlPanel skips serving and syncing the bundled management UI when true.
 	DisableControlPanel bool `yaml:"disable-control-panel"`
 	// DisableAutoUpdatePanel is retained for configuration compatibility only.
@@ -204,6 +227,25 @@ type ErrorCooldowns struct {
 	RateLimitMaxSeconds      *int `yaml:"rate-limit-max-seconds,omitempty" json:"rate-limit-max-seconds,omitempty"`
 }
 
+// AuthAutoDeleteConfig controls whether auths are automatically deleted for specific status classes.
+type AuthAutoDeleteConfig struct {
+	Unauthorized bool `yaml:"status-401" json:"status-401"`
+	RateLimited  bool `yaml:"status-429" json:"status-429"`
+}
+
+// AuthProbeBatchConfig controls queued batch auth probe behavior.
+type AuthProbeBatchConfig struct {
+	Concurrency int `yaml:"concurrency" json:"concurrency"`
+}
+
+// AuthUploadConfig controls auth upload file size and archive limits.
+type AuthUploadConfig struct {
+	MaxJSONSizeMB     int `yaml:"max-json-size-mb" json:"max-json-size-mb"`
+	MaxArchiveSizeMB  int `yaml:"max-archive-size-mb" json:"max-archive-size-mb"`
+	MaxArchiveEntries int `yaml:"max-archive-entries" json:"max-archive-entries"`
+	MaxExpandedSizeMB int `yaml:"max-expanded-size-mb" json:"max-expanded-size-mb"`
+}
+
 // MongoStoreConfig configures MongoDB-backed auth storage.
 type MongoStoreConfig struct {
 	// URI is the MongoDB connection string.
@@ -212,6 +254,15 @@ type MongoStoreConfig struct {
 	Database string `yaml:"database" json:"database"`
 	// Collection is the target collection name. Leave empty to use the default.
 	Collection string `yaml:"collection,omitempty" json:"collection,omitempty"`
+}
+
+// SQLiteStoreConfig configures SQLite-backed auth storage.
+type SQLiteStoreConfig struct {
+	// Path is the SQLite database file path.
+	Path string `yaml:"path" json:"path"`
+	// PollIntervalSeconds controls how often the runtime checks SQLite for out-of-process auth changes.
+	// Set to 0 to use the built-in default.
+	PollIntervalSeconds int `yaml:"poll-interval-seconds,omitempty" json:"poll-interval-seconds,omitempty"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -596,6 +647,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.ErrorLogsMaxFiles = 10
 	cfg.UsageStatisticsEnabled = false
 	cfg.DisableCooling = false
+	cfg.AuthAutoDelete.Unauthorized = true
+	cfg.AuthAutoDelete.RateLimited = true
+	cfg.AuthProbeBatch.Concurrency = 1
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
@@ -637,8 +691,17 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		// Preserve YAML comments and ordering; update only the nested key.
 		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "secret-key"}, hashed)
 	}
+	if cfg.RemoteManagement.OperatorSecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.OperatorSecretKey) {
+		hashed, errHash := hashSecret(cfg.RemoteManagement.OperatorSecretKey)
+		if errHash != nil {
+			return nil, fmt.Errorf("failed to hash remote management operator key: %w", errHash)
+		}
+		cfg.RemoteManagement.OperatorSecretKey = hashed
+		_ = SaveConfigPreserveCommentsUpdateNestedScalar(configFile, []string{"remote-management", "operator-secret-key"}, hashed)
+	}
 
 	cfg.RemoteManagement.PanelGitHubRepository = strings.TrimSpace(cfg.RemoteManagement.PanelGitHubRepository)
+	cfg.RemoteManagement.PanelTitle = strings.TrimSpace(cfg.RemoteManagement.PanelTitle)
 	if cfg.RemoteManagement.PanelGitHubRepository == "" {
 		cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	}
@@ -651,6 +714,28 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.MongoStore.URI = strings.TrimSpace(cfg.MongoStore.URI)
 	cfg.MongoStore.Database = strings.TrimSpace(cfg.MongoStore.Database)
 	cfg.MongoStore.Collection = strings.TrimSpace(cfg.MongoStore.Collection)
+	cfg.SQLiteStore.Path = strings.TrimSpace(cfg.SQLiteStore.Path)
+	if cfg.SQLiteStore.PollIntervalSeconds < 0 {
+		cfg.SQLiteStore.PollIntervalSeconds = 0
+	}
+	if cfg.AuthProbeBatch.Concurrency <= 0 {
+		cfg.AuthProbeBatch.Concurrency = 1
+	}
+	if cfg.AuthProbeBatch.Concurrency > 64 {
+		cfg.AuthProbeBatch.Concurrency = 64
+	}
+	if cfg.AuthUpload.MaxJSONSizeMB <= 0 {
+		cfg.AuthUpload.MaxJSONSizeMB = 10
+	}
+	if cfg.AuthUpload.MaxArchiveSizeMB <= 0 {
+		cfg.AuthUpload.MaxArchiveSizeMB = 100
+	}
+	if cfg.AuthUpload.MaxArchiveEntries <= 0 {
+		cfg.AuthUpload.MaxArchiveEntries = 10000
+	}
+	if cfg.AuthUpload.MaxExpandedSizeMB <= 0 {
+		cfg.AuthUpload.MaxExpandedSizeMB = 512
+	}
 
 	if cfg.LogsMaxTotalSizeMB < 0 {
 		cfg.LogsMaxTotalSizeMB = 0
@@ -688,6 +773,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
+	cfg.AuthProbeModels = NormalizeProbeModelDefaults(cfg.AuthProbeModels)
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
@@ -712,6 +798,13 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+func (cfg *Config) RetryModelNotSupportedEnabled() bool {
+	if cfg == nil || cfg.RetryModelNotSupported == nil {
+		return true
+	}
+	return *cfg.RetryModelNotSupported
 }
 
 // SanitizeErrorCooldowns clamps negative cooldown overrides to zero while preserving nil defaults.
@@ -742,6 +835,26 @@ func (cfg *Config) SanitizePayloadRules() {
 	}
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+}
+
+// NormalizeProbeModelDefaults trims keys/values, lowercases provider names, and drops empty entries.
+func NormalizeProbeModelDefaults(entries map[string]string) map[string]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	normalized := make(map[string]string, len(entries))
+	for provider, model := range entries {
+		providerKey := strings.ToLower(strings.TrimSpace(provider))
+		modelName := strings.TrimSpace(model)
+		if providerKey == "" || modelName == "" {
+			continue
+		}
+		normalized[providerKey] = modelName
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {

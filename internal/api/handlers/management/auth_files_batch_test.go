@@ -1,6 +1,7 @@
 package management
 
 import (
+	"archive/zip"
 	"bytes"
 	"encoding/json"
 	"mime/multipart"
@@ -81,6 +82,80 @@ func TestUploadAuthFile_BatchMultipart(t *testing.T) {
 	auths := manager.List()
 	if len(auths) != len(files) {
 		t.Fatalf("expected %d auth entries, got %d", len(files), len(auths))
+	}
+}
+
+func TestUploadAuthFile_ZipArchive(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	var archive bytes.Buffer
+	zipWriter := zip.NewWriter(&archive)
+	files := []struct {
+		name    string
+		content string
+	}{
+		{name: "nested/alpha.json", content: `{"type":"codex","email":"alpha@example.com"}`},
+		{name: "beta.json", content: `{"type":"claude","email":"beta@example.com"}`},
+		{name: "__MACOSX/._beta.json", content: "\x00\x01\x02not-json"},
+		{name: "._token_hidden.json", content: "\x00\x01\x02not-json"},
+		{name: ".DS_Store", content: "ignored"},
+		{name: "notes.txt", content: "ignored"},
+	}
+	for _, file := range files {
+		part, err := zipWriter.Create(file.name)
+		if err != nil {
+			t.Fatalf("failed to create zip entry: %v", err)
+		}
+		if _, err = part.Write([]byte(file.content)); err != nil {
+			t.Fatalf("failed to write zip entry: %v", err)
+		}
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("failed to close zip writer: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "bundle.zip")
+	if err != nil {
+		t.Fatalf("failed to create multipart zip part: %v", err)
+	}
+	if _, err = part.Write(archive.Bytes()); err != nil {
+		t.Fatalf("failed to write multipart zip content: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("failed to close multipart writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Request = req
+
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected upload status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if got, ok := payload["uploaded"].(float64); !ok || int(got) != 2 {
+		t.Fatalf("expected uploaded=2, got %#v", payload["uploaded"])
+	}
+
+	for _, expectedName := range []string{"alpha.json", "beta.json"} {
+		if _, err := os.Stat(filepath.Join(authDir, expectedName)); err != nil {
+			t.Fatalf("expected extracted auth file %s to exist: %v", expectedName, err)
+		}
 	}
 }
 

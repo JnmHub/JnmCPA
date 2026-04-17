@@ -347,6 +347,41 @@ func TestManagerExecute_OpenAICompatAliasPoolFallsBackOnModelSupportBadRequest(t
 	}
 }
 
+func TestManagerExecute_OpenAICompatAliasPoolStopsOnModelSupportBadRequestWhenRetryDisabled(t *testing.T) {
+	alias := "claude-opus-4.66"
+	modelSupportErr := &Error{
+		HTTPStatus: http.StatusBadRequest,
+		Message:    "invalid_request_error: The requested model is not supported.",
+	}
+	executor := &openAICompatPoolExecutor{
+		id:            "pool",
+		executeErrors: map[string]error{"qwen3.5-plus": modelSupportErr},
+	}
+	m := newOpenAICompatPoolTestManager(t, alias, []internalconfig.OpenAICompatibilityModel{
+		{Name: "qwen3.5-plus", Alias: alias},
+		{Name: "glm-5", Alias: alias},
+	}, executor)
+	m.SetConfig(&internalconfig.Config{
+		OpenAICompatibility: []internalconfig.OpenAICompatibility{{
+			Name: "pool",
+			Models: []internalconfig.OpenAICompatibilityModel{
+				{Name: "qwen3.5-plus", Alias: alias},
+				{Name: "glm-5", Alias: alias},
+			},
+		}},
+		RetryModelNotSupported: boolPtr(false),
+	})
+
+	_, err := m.Execute(context.Background(), []string{"pool"}, cliproxyexecutor.Request{Model: alias}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("expected unsupported-model error without fallback")
+	}
+	got := executor.ExecuteModels()
+	if len(got) != 1 || got[0] != "qwen3.5-plus" {
+		t.Fatalf("execute calls = %v, want only first unsupported model", got)
+	}
+}
+
 func TestManagerExecute_OpenAICompatAliasPoolFallsBackOnModelSupportUnprocessableEntity(t *testing.T) {
 	alias := "claude-opus-4.66"
 	modelSupportErr := &Error{

@@ -11,10 +11,13 @@
    - host = 0.0.0.0
    - remote-management.allow-remote = true
    - remote-management.disable-control-panel = false
-   - mongo-store 指向 127.0.0.1:27017
+   - 管理页面入口 = /lijinmu
+   - sqlite-store 指向 /opt/cliproxyapi/data/cliproxy.db
+   - mongo-store 默认关闭
+   - auth-upload / auth-probe-models / retry-model-not-supported 已兼容当前版本
 
 3. install-mongodb.sh
-   自动安装 MongoDB 8.0，并默认只监听 127.0.0.1
+   可选脚本。自动安装 MongoDB 8.0，并默认只监听 127.0.0.1
 
 4. start-cpa.sh
    启动 / 停止 / 查看状态 / 查看日志
@@ -35,13 +38,16 @@
    最少改这两个：
    - remote-management.secret-key
    - api-keys
-3. 安装 MongoDB
-   sudo ./install-mongodb.sh
-4. 启动 CPA
+3. 启动 CPA
    ./start-cpa.sh start --daemon
 
 如果你要改成 systemd 守护：
    sudo ./install-systemd.sh
+
+如果你想改成 MongoDB：
+   先把 config.yaml 里的 sqlite-store.path 清空
+   再填写 mongo-store
+   最后执行 sudo ./install-mongodb.sh
 
 如果你想自定义资源限制，可以这样：
    CPA_RESOURCE_KEEP_FREE_PERCENT=15 sudo ./install-systemd.sh

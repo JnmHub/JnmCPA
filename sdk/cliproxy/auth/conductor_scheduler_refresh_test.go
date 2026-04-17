@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -107,6 +108,12 @@ func TestManager_RefreshSchedulerEntry_RebuildsSupportedModelSetAfterModelRegist
 func TestManager_PickNext_RebuildsSchedulerAfterModelCooldownError(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.SetConfig(&internalconfig.Config{
+		AuthAutoDelete: internalconfig.AuthAutoDeleteConfig{
+			Unauthorized: true,
+			RateLimited:  false,
+		},
+	})
 	manager.RegisterExecutor(schedulerProviderTestExecutor{provider: "gemini"})
 
 	registerSchedulerModels(t, "gemini", "scheduler-cooldown-rebuild-model", "cooldown-stale-old")

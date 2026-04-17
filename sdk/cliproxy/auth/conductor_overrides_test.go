@@ -3,11 +3,13 @@ package auth
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
@@ -328,6 +330,54 @@ func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	}
 	if state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+}
+
+func TestManager_ModelSupportBadRequest_StopsWhenRetryDisabled(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{RetryModelNotSupported: boolPtr(false)})
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-bad-auth": &Error{
+				HTTPStatus: http.StatusBadRequest,
+				Message:    "invalid_request_error: The requested model is not supported.",
+			},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatalf("expected execute to stop on first unsupported-model error")
+	}
+	if !strings.Contains(errExecute.Error(), "not supported") {
+		t.Fatalf("unexpected error: %v", errExecute)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("execute calls = %v, want %v", got, want)
 	}
 }
 

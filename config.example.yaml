@@ -22,6 +22,14 @@ remote-management:
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
   secret-key: ""
 
+  # Limited management key for file operators.
+  # This key can only upload auth files and read auth file count statistics.
+  # It is also hashed automatically when stored as plaintext.
+  operator-secret-key: ""
+
+  # Optional browser tab title for the management page.
+  panel-title: ""
+
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
 
@@ -35,6 +43,14 @@ remote-management:
 
 # Authentication directory (supports ~ for home directory)
 auth-dir: "~/.cli-proxy-api"
+
+# SQLite-backed auth storage
+# Recommended for single-machine deployments when you want lower memory usage and
+# you do not need a separate database service. When sqlite-store.path is set, it
+# takes precedence over mongo-store.
+sqlite-store:
+  path: ""
+  poll-interval-seconds: 5
 
 # Mongo-backed auth storage
 # When enabled, auth credentials are loaded from MongoDB and the service skips
@@ -63,6 +79,28 @@ pprof:
 
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
+
+# Control whether specific upstream failures hard-delete auth credentials.
+auth-auto-delete:
+  status-401: true
+  status-429: true
+
+# Batch probe task concurrency for management-side auth testing.
+auth-probe-batch:
+  concurrency: 1
+
+# Optional per-provider default models for management-side auth probing.
+# When set, manual probe requests use these models first.
+# auth-probe-models:
+#   codex: "gpt-4.1"
+#   claude: "claude-sonnet-4-5"
+
+# Auth upload limits for management-side JSON / ZIP imports.
+auth-upload:
+  max-json-size-mb: 10
+  max-archive-size-mb: 100
+  max-archive-entries: 10000
+  max-expanded-size-mb: 512
 
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
@@ -98,6 +136,10 @@ max-retry-credentials: 0
 
 # Maximum wait time in seconds for a cooled-down credential before triggering a retry.
 max-retry-interval: 30
+
+# Whether a 400/422 "model not supported" error should continue trying other credentials.
+# Default true preserves the current fallback behavior.
+retry-model-not-supported: true
 
 # Error-specific cooldowns in seconds.
 # Leave a field unset to use the built-in default; set to 0 to disable cooldown for that error class.

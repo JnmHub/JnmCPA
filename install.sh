@@ -62,6 +62,9 @@ usage() {
 说明:
   - 脚本运行后会自动安装基础依赖：unzip / ca-certificates（以及缺失时的 curl）
   - 如果你使用的是 `curl | bash`，机器本身必须先有 curl 才能把脚本拉下来
+  - 当前安装脚本只面向 minimal-linux-* 最小部署包
+  - 当前最小部署包默认启用 sqlite-store，检测到后会自动跳过 MongoDB 安装
+  - 当前管理页入口为 /lijinmu
   - 使用 systemd 安装时，默认会为 CPA 预留 9% 的 CPU 和内存
 EOF
 }
@@ -182,6 +185,29 @@ download_release_package() {
   printf '%s\n' "$output_path"
 }
 
+config_uses_sqlite_store() {
+  local config_path="$1"
+  [[ -f "$config_path" ]] || return 1
+
+  local sqlite_path
+  sqlite_path="$(
+    awk '
+      /^[[:space:]]*sqlite-store:[[:space:]]*$/ { inblock=1; next }
+      inblock && /^[^[:space:]]/ { inblock=0 }
+      inblock && /^[[:space:]]*path:[[:space:]]*/ {
+        line = $0
+        sub(/^[[:space:]]*path:[[:space:]]*/, "", line)
+        gsub(/"/, "", line)
+        gsub(/\047/, "", line)
+        print line
+        exit
+      }
+    ' "$config_path"
+  )"
+  sqlite_path="$(printf '%s' "$sqlite_path" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  [[ -n "$sqlite_path" ]]
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-mongo)
@@ -223,6 +249,11 @@ main() {
     "${extracted_dir}/install-mongodb.sh" \
     "${extracted_dir}/install-systemd.sh" \
     "${extracted_dir}/start-cpa.sh"
+
+  if [[ "$SKIP_MONGO" != "1" ]] && config_uses_sqlite_store "${extracted_dir}/config.yaml"; then
+    info "检测到 sqlite-store 已启用，默认跳过 MongoDB 安装"
+    SKIP_MONGO=1
+  fi
 
   if [[ "$SKIP_MONGO" != "1" ]]; then
     info "安装 MongoDB"

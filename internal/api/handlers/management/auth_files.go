@@ -1,6 +1,7 @@
 package management
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -13,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -30,6 +32,7 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -48,12 +51,16 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort = 54545
-	geminiCallbackPort    = 8085
-	codexCallbackPort     = 1455
-	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion      = "v1internal"
-	maxAuthFilesPageSize  = 200
+	anthropicCallbackPort             = 54545
+	geminiCallbackPort                = 8085
+	codexCallbackPort                 = 1455
+	geminiCLIEndpoint                 = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion                  = "v1internal"
+	maxAuthFilesPageSize              = 200
+	defaultUploadedAuthFileSize       = 10 << 20  // 10 MB per json
+	defaultUploadedAuthArchiveSize    = 100 << 20 // 100 MB compressed zip
+	defaultUploadedAuthArchiveEntries = 10000
+	defaultUploadedAuthExpandedSize   = 512 << 20 // 512 MB total expanded size
 )
 
 var healthyAuthFileMessages = map[string]struct{}{
@@ -93,10 +100,11 @@ type callbackForwarder struct {
 }
 
 var (
-	callbackForwardersMu  sync.Mutex
-	callbackForwarders    = make(map[int]*callbackForwarder)
-	errAuthFileMustBeJSON = errors.New("auth file must be .json")
-	errAuthFileNotFound   = errors.New("auth file not found")
+	callbackForwardersMu       sync.Mutex
+	callbackForwarders         = make(map[int]*callbackForwarder)
+	errAuthFileMustBeJSON      = errors.New("auth file must be .json")
+	errAuthFileMustBeJSONOrZIP = errors.New("file must be .json or .zip")
+	errAuthFileNotFound        = errors.New("auth file not found")
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -292,6 +300,61 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	c.JSON(http.StatusOK, buildAuthFileListResponse(h.collectManagedAuthFileEntries(), query))
 }
 
+// CountAuthFiles returns lightweight auth file count statistics without exposing file details.
+func (h *Handler) CountAuthFiles(c *gin.Context) {
+	if h == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler not initialized"})
+		return
+	}
+	query, err := parseAuthFileListQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	query.Page = 1
+	query.PageSize = 0
+
+	entries := h.collectManagedAuthFileEntries()
+	if h.authManager == nil {
+		entries = h.collectDiskManagedAuthFileEntries()
+	}
+	result := filterAuthFileEntries(entries, query)
+
+	enabledCount := 0
+	disabledCount := 0
+	usableCount := 0
+	coolingCount := 0
+	problemCount := 0
+	for _, entry := range result.Files {
+		if disabled, ok := authFileEntryBool(entry, "disabled"); ok {
+			if disabled {
+				disabledCount++
+			} else {
+				enabledCount++
+			}
+		}
+		if usable, ok := authFileEntryBool(entry, "usable"); ok && usable {
+			usableCount++
+		}
+		if cooling, ok := authFileEntryBool(entry, "cooling"); ok && cooling {
+			coolingCount++
+		}
+		if authFileEntryHasProblem(entry) {
+			problemCount++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"total":         result.Total,
+		"type_counts":   result.TypeCounts,
+		"enabled":       enabledCount,
+		"disabled":      disabledCount,
+		"usable":        usableCount,
+		"cooling":       coolingCount,
+		"problem_count": problemCount,
+	})
+}
+
 func parseAuthFileListQuery(c *gin.Context) (authFileListQuery, error) {
 	query := authFileListQuery{
 		Page: 1,
@@ -422,6 +485,21 @@ func buildAuthFileListResponse(entries []gin.H, query authFileListQuery) gin.H {
 		"total_pages": result.TotalPages,
 		"type_counts": result.TypeCounts,
 	}
+}
+
+func (h *Handler) collectDiskManagedAuthFileEntries() []gin.H {
+	if h == nil || h.cfg == nil {
+		return nil
+	}
+	authDir, err := util.ResolveAuthDir(h.cfg.AuthDir)
+	if err != nil || authDir == "" {
+		return nil
+	}
+	files, errRead := h.readDiskAuthEntries(authDir)
+	if errRead != nil {
+		return nil
+	}
+	return files
 }
 
 func filterAuthFileEntries(entries []gin.H, query authFileListQuery) authFileListResult {
@@ -892,9 +970,120 @@ func authProviderKey(auth *coreauth.Auth) string {
 	return strings.ToLower(strings.TrimSpace(auth.Provider))
 }
 
-func probeModelForAuth(auth *coreauth.Auth) (string, bool) {
+type authProbeModelSelection struct {
+	Model     string
+	Routeable bool
+	Source    string
+}
+
+func authExcludedModels(auth *coreauth.Auth) []string {
+	raw := strings.TrimSpace(authAttribute(auth, "excluded_models"))
+	if raw == "" {
+		return nil
+	}
+	items := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t'
+	})
+	result := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		trimmed := strings.ToLower(strings.TrimSpace(item))
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		result = append(result, trimmed)
+	}
+	return result
+}
+
+func authModelIsExcluded(auth *coreauth.Auth, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" {
+		return false
+	}
+	for _, pattern := range authExcludedModels(auth) {
+		if authProbeMatchWildcard(pattern, model) {
+			return true
+		}
+	}
+	return false
+}
+
+func authProbeMatchWildcard(pattern, value string) bool {
+	pattern = strings.ToLower(strings.TrimSpace(pattern))
+	value = strings.ToLower(strings.TrimSpace(value))
+	if pattern == "" || value == "" {
+		return false
+	}
+	if !strings.Contains(pattern, "*") {
+		return pattern == value
+	}
+
+	parts := strings.Split(pattern, "*")
+	if prefix := parts[0]; prefix != "" {
+		if !strings.HasPrefix(value, prefix) {
+			return false
+		}
+		value = value[len(prefix):]
+	}
+	if suffix := parts[len(parts)-1]; suffix != "" {
+		if !strings.HasSuffix(value, suffix) {
+			return false
+		}
+		value = value[:len(value)-len(suffix)]
+	}
+	for i := 1; i < len(parts)-1; i++ {
+		segment := parts[i]
+		if segment == "" {
+			continue
+		}
+		idx := strings.Index(value, segment)
+		if idx < 0 {
+			return false
+		}
+		value = value[idx+len(segment):]
+	}
+	return true
+}
+
+func authModelStateIsBlocked(auth *coreauth.Auth, model string, now time.Time) bool {
+	if auth == nil || model == "" || len(auth.ModelStates) == 0 {
+		return false
+	}
+	state, ok := auth.ModelStates[model]
+	if !ok || state == nil {
+		return false
+	}
+	if state.Status == coreauth.StatusDisabled {
+		return true
+	}
+	if !state.Unavailable {
+		return false
+	}
+	if state.NextRetryAfter.IsZero() {
+		return false
+	}
+	return state.NextRetryAfter.After(now)
+}
+
+func probeModelSelectionForAuth(cfg *config.Config, auth *coreauth.Auth) authProbeModelSelection {
 	if auth == nil {
-		return "", false
+		return authProbeModelSelection{}
+	}
+	now := time.Now()
+
+	if cfg != nil {
+		if configured := strings.TrimSpace(cfg.AuthProbeModels[authProviderKey(auth)]); configured != "" {
+			return authProbeModelSelection{
+				Model:     configured,
+				Routeable: false,
+				Source:    "config",
+			}
+		}
 	}
 
 	models := registry.GetGlobalRegistry().GetModelsForClient(auth.ID)
@@ -903,10 +1092,24 @@ func probeModelForAuth(auth *coreauth.Auth) (string, bool) {
 			continue
 		}
 		if id := strings.TrimSpace(model.ID); id != "" {
-			return id, true
+			if authModelIsExcluded(auth, id) || authModelStateIsBlocked(auth, id, now) {
+				continue
+			}
+			return authProbeModelSelection{
+				Model:     id,
+				Routeable: true,
+				Source:    "registry",
+			}
 		}
 		if name := strings.TrimSpace(model.Name); name != "" {
-			return name, true
+			if authModelIsExcluded(auth, name) || authModelStateIsBlocked(auth, name, now) {
+				continue
+			}
+			return authProbeModelSelection{
+				Model:     name,
+				Routeable: true,
+				Source:    "registry",
+			}
 		}
 	}
 
@@ -918,8 +1121,15 @@ func probeModelForAuth(auth *coreauth.Auth) (string, bool) {
 			}
 		}
 		sort.Strings(keys)
-		if len(keys) > 0 {
-			return keys[0], false
+		for _, key := range keys {
+			if authModelIsExcluded(auth, key) || authModelStateIsBlocked(auth, key, now) {
+				continue
+			}
+			return authProbeModelSelection{
+				Model:     key,
+				Routeable: false,
+				Source:    "model_state",
+			}
 		}
 	}
 
@@ -936,7 +1146,20 @@ func probeModelForAuth(auth *coreauth.Auth) (string, bool) {
 		"vertex":      "gemini-2.5-pro",
 	}
 
-	return defaultModels[authProviderKey(auth)], false
+	defaultModel := strings.TrimSpace(defaultModels[authProviderKey(auth)])
+	if defaultModel == "" || authModelIsExcluded(auth, defaultModel) || authModelStateIsBlocked(auth, defaultModel, now) {
+		return authProbeModelSelection{}
+	}
+	return authProbeModelSelection{
+		Model:     defaultModel,
+		Routeable: false,
+		Source:    "default",
+	}
+}
+
+func probeModelForAuth(auth *coreauth.Auth) (string, bool) {
+	selection := probeModelSelectionForAuth(nil, auth)
+	return selection.Model, selection.Routeable
 }
 
 func buildAuthProbePayload(model string) ([]byte, error) {
@@ -949,6 +1172,20 @@ func buildAuthProbePayload(model string) ([]byte, error) {
 			},
 		},
 		"max_tokens": 1,
+	})
+}
+
+func buildAuthProbeStreamPayload(model string) ([]byte, error) {
+	return json.Marshal(map[string]any{
+		"model": model,
+		"messages": []map[string]any{
+			{
+				"role":    "user",
+				"content": "health check",
+			},
+		},
+		"max_tokens": 1,
+		"stream":     true,
 	})
 }
 
@@ -1002,10 +1239,18 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 
 // List auth files from disk when the auth manager is unavailable.
 func (h *Handler) listAuthFilesFromDisk(c *gin.Context, query authFileListQuery) {
-	entries, err := os.ReadDir(h.cfg.AuthDir)
+	files, err := h.readDiskAuthEntries(h.cfg.AuthDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
 		return
+	}
+	c.JSON(http.StatusOK, buildAuthFileListResponse(files, query))
+}
+
+func (h *Handler) readDiskAuthEntries(authDir string) ([]gin.H, error) {
+	entries, err := os.ReadDir(authDir)
+	if err != nil {
+		return nil, err
 	}
 	files := make([]gin.H, 0)
 	for _, e := range entries {
@@ -1020,7 +1265,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, query authFileListQuery)
 			fileData := gin.H{"name": name, "size": info.Size(), "modtime": info.ModTime()}
 
 			// Read file to get type field
-			full := filepath.Join(h.cfg.AuthDir, name)
+			full := filepath.Join(authDir, name)
 			if data, errRead := os.ReadFile(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
 				emailValue := gjson.GetBytes(data, "email").String()
@@ -1046,7 +1291,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, query authFileListQuery)
 			files = append(files, fileData)
 		}
 	}
-	c.JSON(http.StatusOK, buildAuthFileListResponse(files, query))
+	return files, nil
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
@@ -1117,6 +1362,8 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if !auth.NextRetryAfter.IsZero() {
 		entry["next_retry_after"] = auth.NextRetryAfter
+	} else if displayRetry := authDisplayNextRetryAfter(auth, now); !displayRetry.IsZero() {
+		entry["next_retry_after"] = displayRetry
 	}
 	if path != "" && storageBackend == "" {
 		entry["path"] = path
@@ -1192,6 +1439,35 @@ func authUsable(auth *coreauth.Auth, now time.Time) bool {
 		return false
 	}
 	return !authCooling(auth, now)
+}
+
+func authDisplayNextRetryAfter(auth *coreauth.Auth, now time.Time) time.Time {
+	if auth == nil {
+		return time.Time{}
+	}
+	if !auth.NextRetryAfter.IsZero() && auth.NextRetryAfter.After(now) {
+		return auth.NextRetryAfter
+	}
+	if !auth.Quota.NextRecoverAt.IsZero() && auth.Quota.NextRecoverAt.After(now) {
+		return auth.Quota.NextRecoverAt
+	}
+	earliest := time.Time{}
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if !state.NextRetryAfter.IsZero() && state.NextRetryAfter.After(now) {
+			if earliest.IsZero() || state.NextRetryAfter.Before(earliest) {
+				earliest = state.NextRetryAfter
+			}
+		}
+		if !state.Quota.NextRecoverAt.IsZero() && state.Quota.NextRecoverAt.After(now) {
+			if earliest.IsZero() || state.Quota.NextRecoverAt.Before(earliest) {
+				earliest = state.Quota.NextRecoverAt
+			}
+		}
+	}
+	return earliest
 }
 
 func applyAuthResultFields(entry gin.H, auth *coreauth.Auth) {
@@ -1356,18 +1632,76 @@ func (h *Handler) DownloadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "name must end with .json"})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, name)
-	data, err := os.ReadFile(full)
+	data, statusCode, err := h.downloadableAuthFilePayload(name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			c.JSON(404, gin.H{"error": "file not found"})
-		} else {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
-		}
+		c.JSON(statusCode, gin.H{"error": err.Error()})
 		return
 	}
 	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", name))
 	c.Data(200, "application/json", data)
+}
+
+func (h *Handler) ExportAuthFiles(c *gin.Context) {
+	query, err := parseAuthFileListQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	names := h.authFileNamesMatchingQuery(query)
+	if len(names) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no auth files match the current filter"})
+		return
+	}
+
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"auth-files-export-%s.zip\"", time.Now().UTC().Format("20060102-150405")))
+
+	zw := zip.NewWriter(c.Writer)
+	defer func() { _ = zw.Close() }()
+
+	for _, name := range names {
+		payload, _, errDownload := h.downloadableAuthFilePayload(name)
+		if errDownload != nil {
+			continue
+		}
+		fileWriter, errCreate := zw.Create(name)
+		if errCreate != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to create zip entry: %v", errCreate)})
+			return
+		}
+		if _, errWrite := fileWriter.Write(payload); errWrite != nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write zip entry: %v", errWrite)})
+			return
+		}
+	}
+}
+
+func (h *Handler) downloadableAuthFilePayload(name string) ([]byte, int, error) {
+	full := filepath.Join(h.cfg.AuthDir, name)
+	data, err := os.ReadFile(full)
+	if err == nil {
+		return data, http.StatusOK, nil
+	}
+	if !os.IsNotExist(err) {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to read file: %v", err)
+	}
+
+	auth := h.findAuthForDelete(name)
+	if auth == nil || auth.Metadata == nil {
+		return nil, http.StatusNotFound, fmt.Errorf("file not found")
+	}
+
+	exported := make(map[string]any, len(auth.Metadata)+1)
+	for key, value := range auth.Metadata {
+		exported[key] = value
+	}
+	exported["disabled"] = auth.Disabled
+	payload, errMarshal := json.Marshal(exported)
+	if errMarshal != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to encode auth record: %v", errMarshal)
+	}
+	return payload, http.StatusOK, nil
 }
 
 // Upload auth file: multipart or raw JSON with ?name=
@@ -1384,35 +1718,36 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		return
 	}
 	if len(fileHeaders) == 1 {
-		if _, errUpload := h.storeUploadedAuthFile(ctx, fileHeaders[0]); errUpload != nil {
-			if errors.Is(errUpload, errAuthFileMustBeJSON) {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json"})
+		uploadedNames, errUpload := h.storeUploadedAuthPayload(ctx, fileHeaders[0])
+		if errUpload != nil {
+			if errors.Is(errUpload, errAuthFileMustBeJSONOrZIP) || errors.Is(errUpload, errAuthFileMustBeJSON) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "file must be .json or .zip"})
 				return
 			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errUpload.Error()})
 			return
 		}
-		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, gin.H{"status": "ok", "uploaded": len(uploadedNames), "files": uploadedNames})
 		return
 	}
 	if len(fileHeaders) > 1 {
 		uploaded := make([]string, 0, len(fileHeaders))
 		failed := make([]gin.H, 0)
 		for _, file := range fileHeaders {
-			name, errUpload := h.storeUploadedAuthFile(ctx, file)
+			names, errUpload := h.storeUploadedAuthPayload(ctx, file)
 			if errUpload != nil {
 				failureName := ""
 				if file != nil {
 					failureName = filepath.Base(file.Filename)
 				}
 				msg := errUpload.Error()
-				if errors.Is(errUpload, errAuthFileMustBeJSON) {
-					msg = "file must be .json"
+				if errors.Is(errUpload, errAuthFileMustBeJSONOrZIP) || errors.Is(errUpload, errAuthFileMustBeJSON) {
+					msg = "file must be .json or .zip"
 				}
 				failed = append(failed, gin.H{"name": failureName, "error": msg})
 				continue
 			}
-			uploaded = append(uploaded, name)
+			uploaded = append(uploaded, names...)
 		}
 		if len(failed) > 0 {
 			c.JSON(http.StatusMultiStatus, gin.H{
@@ -1442,6 +1777,11 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	maxUploadedAuthFileSize := h.maxUploadedAuthFileSize()
+	if int64(len(data)) > maxUploadedAuthFileSize {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("file size exceeds %d bytes", maxUploadedAuthFileSize)})
 		return
 	}
 	if err = h.writeAuthFile(ctx, filepath.Base(name), data); err != nil {
@@ -1603,6 +1943,54 @@ func (h *Handler) multipartAuthFileHeaders(c *gin.Context) ([]*multipart.FileHea
 	return headers, nil
 }
 
+func (h *Handler) maxUploadedAuthFileSize() int64 {
+	if h == nil || h.cfg == nil || h.cfg.AuthUpload.MaxJSONSizeMB <= 0 {
+		return defaultUploadedAuthFileSize
+	}
+	return int64(h.cfg.AuthUpload.MaxJSONSizeMB) << 20
+}
+
+func (h *Handler) maxUploadedAuthArchiveSize() int64 {
+	if h == nil || h.cfg == nil || h.cfg.AuthUpload.MaxArchiveSizeMB <= 0 {
+		return defaultUploadedAuthArchiveSize
+	}
+	return int64(h.cfg.AuthUpload.MaxArchiveSizeMB) << 20
+}
+
+func (h *Handler) maxUploadedAuthArchiveEntries() int {
+	if h == nil || h.cfg == nil || h.cfg.AuthUpload.MaxArchiveEntries <= 0 {
+		return defaultUploadedAuthArchiveEntries
+	}
+	return h.cfg.AuthUpload.MaxArchiveEntries
+}
+
+func (h *Handler) maxUploadedAuthExpandedSize() int64 {
+	if h == nil || h.cfg == nil || h.cfg.AuthUpload.MaxExpandedSizeMB <= 0 {
+		return defaultUploadedAuthExpandedSize
+	}
+	return int64(h.cfg.AuthUpload.MaxExpandedSizeMB) << 20
+}
+
+func (h *Handler) storeUploadedAuthPayload(ctx context.Context, file *multipart.FileHeader) ([]string, error) {
+	if file == nil {
+		return nil, fmt.Errorf("no file uploaded")
+	}
+	name := filepath.Base(strings.TrimSpace(file.Filename))
+	lowerName := strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(lowerName, ".json"):
+		uploadedName, err := h.storeUploadedAuthFile(ctx, file)
+		if err != nil {
+			return nil, err
+		}
+		return []string{uploadedName}, nil
+	case strings.HasSuffix(lowerName, ".zip"):
+		return h.storeUploadedAuthArchive(ctx, file)
+	default:
+		return nil, errAuthFileMustBeJSONOrZIP
+	}
+}
+
 func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.FileHeader) (string, error) {
 	if file == nil {
 		return "", fmt.Errorf("no file uploaded")
@@ -1610,6 +1998,10 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 	name := filepath.Base(strings.TrimSpace(file.Filename))
 	if !strings.HasSuffix(strings.ToLower(name), ".json") {
 		return "", errAuthFileMustBeJSON
+	}
+	maxUploadedAuthFileSize := h.maxUploadedAuthFileSize()
+	if file.Size > maxUploadedAuthFileSize {
+		return "", fmt.Errorf("file %s exceeds %d bytes", name, maxUploadedAuthFileSize)
 	}
 	src, err := file.Open()
 	if err != nil {
@@ -1625,6 +2017,134 @@ func (h *Handler) storeUploadedAuthFile(ctx context.Context, file *multipart.Fil
 		return "", err
 	}
 	return name, nil
+}
+
+func (h *Handler) storeUploadedAuthArchive(ctx context.Context, file *multipart.FileHeader) ([]string, error) {
+	if file == nil {
+		return nil, fmt.Errorf("no file uploaded")
+	}
+	name := filepath.Base(strings.TrimSpace(file.Filename))
+	if !strings.HasSuffix(strings.ToLower(name), ".zip") {
+		return nil, errAuthFileMustBeJSONOrZIP
+	}
+	if file.Size <= 0 {
+		return nil, fmt.Errorf("zip archive %s is empty", name)
+	}
+	maxUploadedAuthArchiveSize := h.maxUploadedAuthArchiveSize()
+	if file.Size > maxUploadedAuthArchiveSize {
+		return nil, fmt.Errorf("zip archive %s exceeds %d bytes", name, maxUploadedAuthArchiveSize)
+	}
+
+	src, err := file.Open()
+	if err != nil {
+		return nil, fmt.Errorf("failed to open uploaded archive: %w", err)
+	}
+	defer src.Close()
+
+	readerAt, ok := src.(interface {
+		io.ReaderAt
+		io.Reader
+		io.Seeker
+		io.Closer
+	})
+	if !ok {
+		return nil, fmt.Errorf("uploaded archive %s is not seekable", name)
+	}
+
+	zr, err := zip.NewReader(readerAt, file.Size)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse zip archive %s: %w", name, err)
+	}
+	maxUploadedAuthArchiveEntries := h.maxUploadedAuthArchiveEntries()
+	if len(zr.File) > maxUploadedAuthArchiveEntries {
+		return nil, fmt.Errorf("zip archive %s contains too many files (max %d)", name, maxUploadedAuthArchiveEntries)
+	}
+
+	uploaded := make([]string, 0, len(zr.File))
+	seenNames := make(map[string]struct{}, len(zr.File))
+	var expandedTotal int64
+
+	for _, entry := range zr.File {
+		if entry == nil || entry.FileInfo().IsDir() {
+			continue
+		}
+		entryName, skipEntry, errName := normalizeUploadedArchiveEntryName(entry.Name)
+		if errName != nil {
+			return nil, fmt.Errorf("invalid archive entry %q: %w", entry.Name, errName)
+		}
+		if skipEntry {
+			continue
+		}
+		if _, exists := seenNames[entryName]; exists {
+			return nil, fmt.Errorf("duplicate file %s inside zip archive", entryName)
+		}
+		seenNames[entryName] = struct{}{}
+
+		maxUploadedAuthFileSize := h.maxUploadedAuthFileSize()
+		if entry.UncompressedSize64 > uint64(maxUploadedAuthFileSize) {
+			return nil, fmt.Errorf("file %s in archive exceeds %d bytes", entryName, maxUploadedAuthFileSize)
+		}
+		expandedTotal += int64(entry.UncompressedSize64)
+		maxUploadedAuthExpandedSize := h.maxUploadedAuthExpandedSize()
+		if expandedTotal > maxUploadedAuthExpandedSize {
+			return nil, fmt.Errorf("zip archive expanded data exceeds %d bytes", maxUploadedAuthExpandedSize)
+		}
+
+		rc, errOpen := entry.Open()
+		if errOpen != nil {
+			return nil, fmt.Errorf("failed to open archive entry %s: %w", entryName, errOpen)
+		}
+		data, errRead := io.ReadAll(io.LimitReader(rc, maxUploadedAuthFileSize+1))
+		_ = rc.Close()
+		if errRead != nil {
+			return nil, fmt.Errorf("failed to read archive entry %s: %w", entryName, errRead)
+		}
+		if int64(len(data)) > maxUploadedAuthFileSize {
+			return nil, fmt.Errorf("file %s in archive exceeds %d bytes", entryName, maxUploadedAuthFileSize)
+		}
+		if errWrite := h.writeAuthFile(ctx, entryName, data); errWrite != nil {
+			return nil, fmt.Errorf("failed to import %s from archive: %w", entryName, errWrite)
+		}
+		uploaded = append(uploaded, entryName)
+	}
+
+	if len(uploaded) == 0 {
+		return nil, fmt.Errorf("zip archive %s does not contain any .json files", name)
+	}
+
+	return uploaded, nil
+}
+
+func normalizeUploadedArchiveEntryName(raw string) (string, bool, error) {
+	name := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if name == "" {
+		return "", true, nil
+	}
+	if strings.HasPrefix(name, "/") {
+		return "", false, fmt.Errorf("absolute paths are not allowed")
+	}
+	clean := path.Clean(name)
+	if clean == "." || clean == "" {
+		return "", true, nil
+	}
+	if strings.HasPrefix(clean, "../") || clean == ".." {
+		return "", false, fmt.Errorf("path traversal is not allowed")
+	}
+	if strings.HasPrefix(clean, "__MACOSX/") || clean == "__MACOSX" {
+		return "", true, nil
+	}
+	base := filepath.Base(clean)
+	switch {
+	case base == "":
+		return "", true, nil
+	case base == ".DS_Store":
+		return "", true, nil
+	case strings.HasPrefix(base, "._"):
+		return "", true, nil
+	case !strings.HasSuffix(strings.ToLower(base), ".json"):
+		return "", true, nil
+	}
+	return base, false, nil
 }
 
 func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) error {
