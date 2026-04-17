@@ -42,10 +42,7 @@ auth-probe-batch:
 
 auth-probe-models:
   codex: gpt-5.4
-error-cooldowns:
-  model-not-supported-seconds: 0
-  rate-limit-base-seconds: 1800
-  rate-limit-max-seconds: 1800
+
 oauth-excluded-models:
   codex:
     - gpt-5
@@ -88,4 +85,5 @@ error-cooldowns:
   payment-required-seconds: 0
   not-found-seconds: 0
   model-not-supported-seconds: 0
-  transient-error-seconds: 0
+  rate-limit-base-seconds: 1800
+  rate-limit-max-seconds: 1800
