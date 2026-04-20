@@ -58,6 +58,7 @@ auth-upload:
   max-expanded-size-mb: 512
 
 retry-model-not-supported: false
+retry-thinking-validation-error: false
 logging-to-file: false
 logs-max-total-size-mb: 512
 error-logs-max-files: 10

@@ -4,11 +4,13 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 import { SelectionCheckbox } from '@/components/ui/SelectionCheckbox';
 import { ToggleSwitch } from '@/components/ui/ToggleSwitch';
 import {
+  IconChartLine,
   IconDownload,
   IconInfo,
   IconModelCluster,
   IconRefreshCw,
   IconSettings,
+  IconSlidersHorizontal,
   IconTrash2,
 } from '@/components/ui/icons';
 import { ProviderStatusBar } from '@/components/providers/ProviderStatusBar';
@@ -54,6 +56,8 @@ export type AuthFileCardProps = {
   keyStats: KeyStats;
   statusBarCache: Map<string, AuthFileStatusBarData>;
   onShowModels: (file: AuthFileItem) => void;
+  onEditWeight: (file: AuthFileItem) => void;
+  onShowQuota: (file: AuthFileItem, quotaType: QuotaProviderType) => void;
   onProbe: (file: AuthFileItem) => void;
   onDownload: (name: string) => void;
   onOpenPrefixProxyEditor: (file: AuthFileItem) => void;
@@ -83,6 +87,8 @@ export function AuthFileCard(props: AuthFileCardProps) {
     keyStats,
     statusBarCache,
     onShowModels,
+    onEditWeight,
+    onShowQuota,
     onProbe,
     onDownload,
     onOpenPrefixProxyEditor,
@@ -101,6 +107,7 @@ export function AuthFileCard(props: AuthFileCardProps) {
 
   const quotaType =
     quotaFilterType && resolveQuotaType(file) === quotaFilterType ? quotaFilterType : null;
+  const availableQuotaType = resolveQuotaType(file);
 
   const showQuotaLayout = Boolean(quotaType) && !isRuntimeOnly && !compact;
 
@@ -215,24 +222,48 @@ export function AuthFileCard(props: AuthFileCardProps) {
               )}
             </div>
             {!isRuntimeOnly && (
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => onProbe(file)}
-                className={`${styles.iconButton} ${styles.cardHeaderProbeButton}`}
-                title={
-                  probeLoading
-                    ? t('auth_files.probe_single_loading')
-                    : t('auth_files.probe_single_button')
-                }
-                disabled={disableControls || probeLoading}
-              >
-                {probeLoading ? (
-                  <LoadingSpinner size={12} />
-                ) : (
-                  <IconRefreshCw className={styles.actionIcon} size={14} />
+              <div className={styles.cardHeaderQuickActions}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onEditWeight(file)}
+                  className={`${styles.iconButton} ${styles.cardHeaderProbeButton}`}
+                  title={t('auth_files.weight_modal_button')}
+                  disabled={disableControls}
+                >
+                  <IconSlidersHorizontal className={styles.actionIcon} size={14} />
+                </Button>
+                {availableQuotaType && (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => onShowQuota(file, availableQuotaType)}
+                    className={`${styles.iconButton} ${styles.cardHeaderProbeButton}`}
+                    title={t('auth_files.quota_modal_button')}
+                    disabled={disableControls}
+                  >
+                    <IconChartLine className={styles.actionIcon} size={14} />
+                  </Button>
                 )}
-              </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onProbe(file)}
+                  className={`${styles.iconButton} ${styles.cardHeaderProbeButton}`}
+                  title={
+                    probeLoading
+                      ? t('auth_files.probe_single_loading')
+                      : t('auth_files.probe_single_button')
+                  }
+                  disabled={disableControls || probeLoading}
+                >
+                  {probeLoading ? (
+                    <LoadingSpinner size={12} />
+                  ) : (
+                    <IconRefreshCw className={styles.actionIcon} size={14} />
+                  )}
+                </Button>
+              </div>
             )}
           </div>
 

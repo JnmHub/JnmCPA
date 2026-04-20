@@ -416,6 +416,11 @@ export const normalizeConfigResponse = (raw: unknown): Config => {
   );
   config.retryModelNotSupported =
     retryModelNotSupported === undefined ? true : retryModelNotSupported;
+  const retryThinkingValidationError = normalizeBoolean(
+    raw['retry-thinking-validation-error'] ?? raw.retryThinkingValidationError
+  );
+  config.retryThinkingValidationError =
+    retryThinkingValidationError === undefined ? true : retryThinkingValidationError;
 
   const errorCooldowns = raw['error-cooldowns'] ?? raw.errorCooldowns;
   if (isRecord(errorCooldowns)) {

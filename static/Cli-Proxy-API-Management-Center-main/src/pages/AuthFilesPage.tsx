@@ -44,6 +44,8 @@ import {
 import { AuthDeleteStatsCard } from '@/features/authFiles/components/AuthDeleteStatsCard';
 import { AuthFileCountCard } from '@/features/authFiles/components/AuthFileCountCard';
 import { AuthFileCard } from '@/features/authFiles/components/AuthFileCard';
+import { AuthFileQuotaModal } from '@/features/authFiles/components/AuthFileQuotaModal';
+import { AuthFileWeightModal } from '@/features/authFiles/components/AuthFileWeightModal';
 import { AuthFileModelsModal } from '@/features/authFiles/components/AuthFileModelsModal';
 import { AuthFilesPrefixProxyEditorModal } from '@/features/authFiles/components/AuthFilesPrefixProxyEditorModal';
 import { OAuthExcludedCard } from '@/features/authFiles/components/OAuthExcludedCard';
@@ -113,6 +115,12 @@ export function AuthFilesPage() {
   const [probeBatchJob, setProbeBatchJob] = useState<AuthProbeBatchJob | null>(null);
   const [probeBatchLoading, setProbeBatchLoading] = useState(false);
   const [probeSingleLoading, setProbeSingleLoading] = useState<Record<string, boolean>>({});
+  const [weightModalTarget, setWeightModalTarget] = useState<AuthFileItem | null>(null);
+  const [weightSaving, setWeightSaving] = useState(false);
+  const [quotaModalTarget, setQuotaModalTarget] = useState<{
+    file: AuthFileItem;
+    quotaType: QuotaProviderType;
+  } | null>(null);
   const [resetRetryLoading, setResetRetryLoading] = useState(false);
   const [exportFilteredLoading, setExportFilteredLoading] = useState(false);
   const floatingBatchActionsRef = useRef<HTMLDivElement>(null);
@@ -542,6 +550,13 @@ export function AuthFilesPage() {
     [t]
   );
 
+  const compactFileLabel = useCallback((value: string, maxLength = 32) => {
+    const trimmed = String(value ?? '').trim();
+    if (trimmed.length <= maxLength) return trimmed;
+    const keep = Math.max(8, Math.floor((maxLength - 1) / 2));
+    return `${trimmed.slice(0, keep)}…${trimmed.slice(-keep)}`;
+  }, []);
+
   const handleProbeSingle = useCallback(
     async (file: AuthFileItem) => {
       const name = String(file.name ?? '').trim();
@@ -564,7 +579,7 @@ export function AuthFilesPage() {
         if (payload?.deleted) {
           showNotification(
             t('auth_files.probe_single_deleted', {
-              name,
+              name: compactFileLabel(name),
               statusCode,
               model,
               source: sourceLabel,
@@ -574,7 +589,7 @@ export function AuthFilesPage() {
         } else if (payload?.success) {
           showNotification(
             t('auth_files.probe_single_success', {
-              name,
+              name: compactFileLabel(name),
               statusCode,
               model,
               source: sourceLabel,
@@ -584,7 +599,7 @@ export function AuthFilesPage() {
         } else {
           showNotification(
             t('auth_files.probe_single_failed', {
-              name,
+              name: compactFileLabel(name),
               statusCode,
               model,
               source: sourceLabel,
@@ -612,6 +627,7 @@ export function AuthFilesPage() {
       }
     },
     [
+      compactFileLabel,
       formatProbeModelSource,
       loadFiles,
       refreshAuthDeleteStats,
@@ -620,6 +636,42 @@ export function AuthFilesPage() {
       showNotification,
       t,
     ]
+  );
+
+  const handleShowQuota = useCallback((file: AuthFileItem, quotaType: QuotaProviderType) => {
+    setQuotaModalTarget({ file, quotaType });
+  }, []);
+
+  const handleEditWeight = useCallback((file: AuthFileItem) => {
+    setWeightModalTarget(file);
+  }, []);
+
+  const handleSaveWeight = useCallback(
+    async (priority: number | null) => {
+      if (!weightModalTarget) return;
+      setWeightSaving(true);
+      try {
+        await authFilesApi.patchFields({
+          name: weightModalTarget.name,
+          priority: priority ?? 0,
+        });
+        await Promise.allSettled([loadFiles(), refreshAuthFileCounts(), refreshKeyStats()]);
+        showNotification(
+          t('auth_files.weight_saved_success', {
+            name: weightModalTarget.name,
+            weight: priority ?? 0,
+          }),
+          'success'
+        );
+        setWeightModalTarget(null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : t('common.unknown_error');
+        showNotification(t('auth_files.weight_saved_failed', { message }), 'error');
+      } finally {
+        setWeightSaving(false);
+      }
+    },
+    [loadFiles, refreshAuthFileCounts, refreshKeyStats, showNotification, t, weightModalTarget]
   );
 
   useHeaderRefresh(handleHeaderRefresh);
@@ -1218,6 +1270,8 @@ export function AuthFilesPage() {
                     keyStats={keyStats}
                     statusBarCache={statusBarCache}
                     onShowModels={showModels}
+                    onEditWeight={handleEditWeight}
+                    onShowQuota={handleShowQuota}
                     onProbe={handleProbeSingle}
                     onDownload={handleDownload}
                     onOpenPrefixProxyEditor={openPrefixProxyEditor}
@@ -1296,6 +1350,23 @@ export function AuthFilesPage() {
         excluded={excluded}
         onClose={closeModelsModal}
         onCopyText={copyTextWithNotification}
+      />
+
+      <AuthFileQuotaModal
+        open={quotaModalTarget !== null}
+        file={quotaModalTarget?.file ?? null}
+        quotaType={quotaModalTarget?.quotaType ?? null}
+        disableControls={disableControls}
+        onClose={() => setQuotaModalTarget(null)}
+      />
+
+      <AuthFileWeightModal
+        open={weightModalTarget !== null}
+        file={weightModalTarget}
+        saving={weightSaving}
+        disableControls={disableControls}
+        onClose={() => setWeightModalTarget(null)}
+        onSave={handleSaveWeight}
       />
 
       <AuthFilesPrefixProxyEditorModal

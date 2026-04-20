@@ -96,6 +96,9 @@ type Config struct {
 	// RetryModelNotSupported controls whether 400/422 "model not supported" errors should fall through to other auths.
 	// Nil defaults to true to preserve legacy behavior.
 	RetryModelNotSupported *bool `yaml:"retry-model-not-supported,omitempty" json:"retry-model-not-supported,omitempty"`
+	// RetryThinkingValidationError controls whether 400 thinking/reasoning validation errors should fall through to other auths.
+	// Nil defaults to true to preserve legacy behavior.
+	RetryThinkingValidationError *bool `yaml:"retry-thinking-validation-error,omitempty" json:"retry-thinking-validation-error,omitempty"`
 
 	// ErrorCooldowns defines status-specific cooldown durations in seconds.
 	// Leave fields unset to use built-in defaults; set to 0 to disable cooldown for that category.
@@ -805,6 +808,13 @@ func (cfg *Config) RetryModelNotSupportedEnabled() bool {
 		return true
 	}
 	return *cfg.RetryModelNotSupported
+}
+
+func (cfg *Config) RetryThinkingValidationErrorEnabled() bool {
+	if cfg == nil || cfg.RetryThinkingValidationError == nil {
+		return true
+	}
+	return *cfg.RetryThinkingValidationError
 }
 
 // SanitizeErrorCooldowns clamps negative cooldown overrides to zero while preserving nil defaults.

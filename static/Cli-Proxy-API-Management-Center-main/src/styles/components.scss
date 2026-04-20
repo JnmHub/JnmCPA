@@ -227,7 +227,7 @@ textarea {
   color: var(--text-primary);
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: $spacing-sm;
 
   // Animation states
@@ -251,10 +251,14 @@ textarea {
 
   .message {
     flex: 1;
+    min-width: 0;
     font-weight: 500;
+    overflow-wrap: anywhere;
+    word-break: break-word;
   }
 
   .close-btn {
+    flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -500,9 +504,13 @@ textarea {
   display: flex;
   align-items: center;
   padding: $spacing-md $spacing-lg;
+  padding-right: 60px;
   border-bottom: 1px solid var(--border-color);
 
   .modal-title {
+    min-width: 0;
+    width: 100%;
+    overflow: hidden;
     font-weight: 700;
     font-size: 18px;
     color: var(--text-primary);

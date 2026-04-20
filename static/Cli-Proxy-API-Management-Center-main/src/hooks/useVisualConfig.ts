@@ -585,6 +585,7 @@ export function useVisualConfig() {
         autoDelete401: authAutoDelete?.['status-401'] !== false,
         autoDelete429: authAutoDelete?.['status-429'] !== false,
         retryModelNotSupported: parsed['retry-model-not-supported'] !== false,
+        retryThinkingValidationError: parsed['retry-thinking-validation-error'] !== false,
         forceModelPrefix: Boolean(parsed['force-model-prefix']),
         requestRetry: String(parsed['request-retry'] ?? ''),
         maxRetryCredentials: String(parsed['max-retry-credentials'] ?? ''),
@@ -755,6 +756,13 @@ export function useVisualConfig() {
           }
         } else {
           doc.setIn(['retry-model-not-supported'], false);
+        }
+        if (values.retryThinkingValidationError) {
+          if (docHas(doc, ['retry-thinking-validation-error'])) {
+            doc.deleteIn(['retry-thinking-validation-error']);
+          }
+        } else {
+          doc.setIn(['retry-thinking-validation-error'], false);
         }
         setBooleanInDoc(doc, ['force-model-prefix'], values.forceModelPrefix);
         setIntFromStringInDoc(doc, ['request-retry'], values.requestRetry);

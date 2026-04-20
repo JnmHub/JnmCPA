@@ -276,7 +276,8 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		AuthProbeBatch: internalconfig.AuthProbeBatchConfig{
 			Concurrency: 1,
 		},
-		RetryModelNotSupported: boolPtr(true),
+		RetryModelNotSupported:       boolPtr(true),
+		RetryThinkingValidationError: boolPtr(true),
 	})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
 	manager.scheduler = newAuthScheduler(selector)
@@ -758,10 +759,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if errCtx := ctx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
-			rerr := normalizeResultError(errStream)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-			result.RetryAfter = retryAfterFromError(errStream)
-			m.MarkResult(ctx, result)
+			if m.shouldRecordAuthFailureForError(errStream) {
+				rerr := normalizeResultError(errStream)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(errStream)
+				m.MarkResult(ctx, result)
+			}
 			if m.shouldStopRetryForError(errStream) {
 				return nil, errStream
 			}
@@ -776,26 +779,32 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 				return nil, errCtx
 			}
 			if m.shouldStopRetryForError(bootstrapErr) {
-				rerr := normalizeResultError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
+				if m.shouldRecordAuthFailureForError(bootstrapErr) {
+					rerr := normalizeResultError(bootstrapErr)
+					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+					result.RetryAfter = retryAfterFromError(bootstrapErr)
+					m.MarkResult(ctx, result)
+				}
 				discardStreamChunks(streamResult.Chunks)
 				return nil, bootstrapErr
 			}
 			if idx < len(execModels)-1 {
-				rerr := normalizeResultError(bootstrapErr)
-				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-				result.RetryAfter = retryAfterFromError(bootstrapErr)
-				m.MarkResult(ctx, result)
+				if m.shouldRecordAuthFailureForError(bootstrapErr) {
+					rerr := normalizeResultError(bootstrapErr)
+					result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+					result.RetryAfter = retryAfterFromError(bootstrapErr)
+					m.MarkResult(ctx, result)
+				}
 				discardStreamChunks(streamResult.Chunks)
 				lastErr = bootstrapErr
 				continue
 			}
-			rerr := normalizeResultError(bootstrapErr)
-			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
-			result.RetryAfter = retryAfterFromError(bootstrapErr)
-			m.MarkResult(ctx, result)
+			if m.shouldRecordAuthFailureForError(bootstrapErr) {
+				rerr := normalizeResultError(bootstrapErr)
+				result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: false, Error: rerr}
+				result.RetryAfter = retryAfterFromError(bootstrapErr)
+				m.MarkResult(ctx, result)
+			}
 			discardStreamChunks(streamResult.Chunks)
 			return nil, newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
@@ -1225,11 +1234,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = normalizeResultError(errExec)
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
+				if m.shouldRecordAuthFailureForError(errExec) {
+					result.Error = normalizeResultError(errExec)
+					if ra := retryAfterFromError(errExec); ra != nil {
+						result.RetryAfter = ra
+					}
+					m.MarkResult(execCtx, result)
 				}
-				m.MarkResult(execCtx, result)
 				if m.shouldStopRetryForError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -1300,11 +1311,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
 				}
-				result.Error = normalizeResultError(errExec)
-				if ra := retryAfterFromError(errExec); ra != nil {
-					result.RetryAfter = ra
+				if m.shouldRecordAuthFailureForError(errExec) {
+					result.Error = normalizeResultError(errExec)
+					if ra := retryAfterFromError(errExec); ra != nil {
+						result.RetryAfter = ra
+					}
+					m.MarkResult(execCtx, result)
 				}
-				m.MarkResult(execCtx, result)
 				if m.shouldStopRetryForError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -2447,12 +2460,44 @@ func isRequestInvalidError(err error) bool {
 	}
 }
 
+func isThinkingValidationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var thinkingErr *thinking.ThinkingError
+	return errors.As(err, &thinkingErr) && thinkingErr != nil
+}
+
+func isClientRequestShapeError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return isRequestInvalidError(err) || isThinkingValidationError(err)
+}
+
+func (m *Manager) shouldRecordAuthFailureForError(err error) bool {
+	if err == nil {
+		return true
+	}
+	if isRequestInvalidError(err) {
+		return false
+	}
+	if isThinkingValidationError(err) {
+		return false
+	}
+	return true
+}
+
 func (m *Manager) shouldStopRetryForError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if isRequestInvalidError(err) {
 		return true
+	}
+	if isThinkingValidationError(err) {
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		return cfg == nil || !cfg.RetryThinkingValidationErrorEnabled()
 	}
 	if !isModelSupportError(err) {
 		return false

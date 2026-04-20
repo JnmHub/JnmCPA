@@ -1139,6 +1139,19 @@ export function VisualConfigEditor({
                     disabled={disabled}
                     onChange={(retryModelNotSupported) => onChange({ retryModelNotSupported })}
                   />
+                  <ToggleRow
+                    title={t(
+                      'config_management.visual.sections.network.retry_thinking_validation_error'
+                    )}
+                    description={t(
+                      'config_management.visual.sections.network.retry_thinking_validation_error_desc'
+                    )}
+                    checked={values.retryThinkingValidationError}
+                    disabled={disabled}
+                    onChange={(retryThinkingValidationError) =>
+                      onChange({ retryThinkingValidationError })
+                    }
+                  />
                 </div>
                 <FieldShell
                   label={t('config_management.visual.sections.network.routing_strategy')}

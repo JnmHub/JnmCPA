@@ -26,6 +26,10 @@
   margin: 0;
 }
 
+.quotaSearchBar {
+  max-width: 520px;
+}
+
 .headerActions {
   display: flex;
   gap: $spacing-sm;

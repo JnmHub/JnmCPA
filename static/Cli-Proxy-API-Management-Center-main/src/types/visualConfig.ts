@@ -101,6 +101,7 @@ export type VisualConfigValues = {
   autoDelete401: boolean;
   autoDelete429: boolean;
   retryModelNotSupported: boolean;
+  retryThinkingValidationError: boolean;
   forceModelPrefix: boolean;
   requestRetry: string;
   maxRetryCredentials: string;
@@ -152,6 +153,7 @@ export const DEFAULT_VISUAL_VALUES: VisualConfigValues = {
   autoDelete401: true,
   autoDelete429: true,
   retryModelNotSupported: true,
+  retryThinkingValidationError: true,
   forceModelPrefix: false,
   requestRetry: '',
   maxRetryCredentials: '',

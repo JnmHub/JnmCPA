@@ -36,6 +36,7 @@ export interface Config {
   maxRetryCredentials?: number;
   maxRetryInterval?: number;
   retryModelNotSupported?: boolean;
+  retryThinkingValidationError?: boolean;
   errorCooldowns?: ErrorCooldownsConfig;
   quotaExceeded?: QuotaExceededConfig;
   usageStatisticsEnabled?: boolean;

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 )
 
@@ -381,6 +382,129 @@ func TestManager_ModelSupportBadRequest_StopsWhenRetryDisabled(t *testing.T) {
 	}
 }
 
+func TestManager_ThinkingValidationError_StopsImmediatelyWithoutAuthPenalty(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{RetryThinkingValidationError: boolPtr(false)})
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-bad-auth": thinking.NewThinkingError(
+				thinking.ErrLevelNotSupported,
+				`level "minimal" not supported, valid levels: low, medium, high, xhigh`,
+			),
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatalf("expected execute to stop on thinking validation error")
+	}
+	if !strings.Contains(errExecute.Error(), `level "minimal" not supported`) {
+		t.Fatalf("unexpected error: %v", errExecute)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if updatedBad.LastResult != nil {
+		t.Fatalf("expected no auth result recorded for thinking validation error, got %+v", updatedBad.LastResult)
+	}
+	if updatedBad.LastError != nil {
+		t.Fatalf("expected no auth error recorded for thinking validation error, got %+v", updatedBad.LastError)
+	}
+	if len(updatedBad.ModelStates) != 0 {
+		t.Fatalf("expected no model state pollution, got %+v", updatedBad.ModelStates)
+	}
+}
+
+func TestManager_ThinkingValidationError_FallsBackWhenRetryEnabled(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{RetryThinkingValidationError: boolPtr(true)})
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-bad-auth": thinking.NewThinkingError(
+				thinking.ErrLevelNotSupported,
+				`level "minimal" not supported, valid levels: low, medium, high, xhigh`,
+			),
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	resp, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("expected fallback success, got %v", errExecute)
+	}
+	if string(resp.Payload) != goodAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(resp.Payload), goodAuth.ID)
+	}
+
+	got := executor.ExecuteCalls()
+	want := []string{badAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("execute calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("execute call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if updatedBad.LastResult != nil || updatedBad.LastError != nil || len(updatedBad.ModelStates) != 0 {
+		t.Fatalf("expected no auth penalty on thinking validation fallback, got result=%+v lastErr=%+v states=%+v", updatedBad.LastResult, updatedBad.LastError, updatedBad.ModelStates)
+	}
+}
+
 func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{
@@ -455,6 +579,136 @@ func TestManagerExecuteStream_ModelSupportBadRequestFallsBackAndSuspendsAuth(t *
 	}
 	if state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected bad auth model state cooldown to be set")
+	}
+}
+
+func TestManagerExecuteStream_ThinkingValidationError_StopsImmediatelyWithoutAuthPenalty(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{RetryThinkingValidationError: boolPtr(false)})
+	executor := &authFallbackExecutor{
+		id: "claude",
+		streamFirstErrors: map[string]error{
+			"aa-bad-auth": thinking.NewThinkingError(
+				thinking.ErrLevelNotSupported,
+				`level "minimal" not supported, valid levels: low, medium, high, xhigh`,
+			),
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	_, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatalf("expected execute stream to stop on thinking validation error")
+	}
+	if !strings.Contains(errExecute.Error(), `level "minimal" not supported`) {
+		t.Fatalf("unexpected error: %v", errExecute)
+	}
+
+	got := executor.StreamCalls()
+	want := []string{badAuth.ID}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if updatedBad.LastResult != nil {
+		t.Fatalf("expected no auth result recorded for thinking validation error, got %+v", updatedBad.LastResult)
+	}
+	if updatedBad.LastError != nil {
+		t.Fatalf("expected no auth error recorded for thinking validation error, got %+v", updatedBad.LastError)
+	}
+	if len(updatedBad.ModelStates) != 0 {
+		t.Fatalf("expected no model state pollution, got %+v", updatedBad.ModelStates)
+	}
+}
+
+func TestManagerExecuteStream_ThinkingValidationError_FallsBackWhenRetryEnabled(t *testing.T) {
+	m := NewManager(nil, nil, nil)
+	m.SetConfig(&internalconfig.Config{RetryThinkingValidationError: boolPtr(true)})
+	executor := &authFallbackExecutor{
+		id: "claude",
+		streamFirstErrors: map[string]error{
+			"aa-bad-auth": thinking.NewThinkingError(
+				thinking.ErrLevelNotSupported,
+				`level "minimal" not supported, valid levels: low, medium, high, xhigh`,
+			),
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	model := "claude-opus-4-6"
+	badAuth := &Auth{ID: "aa-bad-auth", Provider: "claude"}
+	goodAuth := &Auth{ID: "bb-good-auth", Provider: "claude"}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(badAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(goodAuth.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(badAuth.ID)
+		reg.UnregisterClient(goodAuth.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), badAuth); errRegister != nil {
+		t.Fatalf("register bad auth: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), goodAuth); errRegister != nil {
+		t.Fatalf("register good auth: %v", errRegister)
+	}
+
+	streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("expected fallback stream success, got %v", errExecute)
+	}
+	var payload []byte
+	for chunk := range streamResult.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected chunk error: %v", chunk.Err)
+		}
+		payload = append(payload, chunk.Payload...)
+	}
+	if string(payload) != goodAuth.ID {
+		t.Fatalf("payload = %q, want %q", string(payload), goodAuth.ID)
+	}
+
+	got := executor.StreamCalls()
+	want := []string{badAuth.ID, goodAuth.ID}
+	if len(got) != len(want) {
+		t.Fatalf("stream calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("stream call %d auth = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	updatedBad, ok := m.GetByID(badAuth.ID)
+	if !ok || updatedBad == nil {
+		t.Fatalf("expected bad auth to remain registered")
+	}
+	if updatedBad.LastResult != nil || updatedBad.LastError != nil || len(updatedBad.ModelStates) != 0 {
+		t.Fatalf("expected no auth penalty on thinking validation fallback, got result=%+v lastErr=%+v states=%+v", updatedBad.LastResult, updatedBad.LastError, updatedBad.ModelStates)
 	}
 }
 

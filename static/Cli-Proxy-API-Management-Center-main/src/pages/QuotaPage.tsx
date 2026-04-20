@@ -2,11 +2,12 @@
  * Quota management page - coordinates the three quota sections.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
+import { useDebounce } from '@/hooks/useDebounce';
 import { useAuthStore } from '@/stores';
-import { authFilesApi, configFileApi } from '@/services/api';
+import { Input } from '@/components/ui/Input';
 import {
   QuotaSection,
   ANTIGRAVITY_CONFIG,
@@ -15,52 +16,23 @@ import {
   GEMINI_CLI_CONFIG,
   KIMI_CONFIG
 } from '@/components/quota';
-import type { AuthFileItem } from '@/types';
 import styles from './QuotaPage.module.scss';
 
 export function QuotaPage() {
   const { t } = useTranslation();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
 
-  const [files, setFiles] = useState<AuthFileItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [refreshNonce, setRefreshNonce] = useState(0);
 
   const disableControls = connectionStatus !== 'connected';
-
-  const loadConfig = useCallback(async () => {
-    try {
-      await configFileApi.fetchConfigYaml();
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : t('notification.refresh_failed');
-      setError((prev) => prev || errorMessage);
-    }
-  }, [t]);
-
-  const loadFiles = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await authFilesApi.list();
-      setFiles(data?.files || []);
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : t('notification.refresh_failed');
-      setError(errorMessage);
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+  const debouncedSearch = useDebounce(search, 300);
 
   const handleHeaderRefresh = useCallback(async () => {
-    await Promise.all([loadConfig(), loadFiles()]);
-  }, [loadConfig, loadFiles]);
+    setRefreshNonce((value) => value + 1);
+  }, []);
 
   useHeaderRefresh(handleHeaderRefresh);
-
-  useEffect(() => {
-    loadFiles();
-    loadConfig();
-  }, [loadFiles, loadConfig]);
 
   return (
     <div className={styles.container}>
@@ -68,38 +40,45 @@ export function QuotaPage() {
         <h1 className={styles.pageTitle}>{t('quota_management.title')}</h1>
         <p className={styles.description}>{t('quota_management.description')}</p>
       </div>
-
-      {error && <div className={styles.errorBox}>{error}</div>}
+      <div className={styles.quotaSearchBar}>
+        <Input
+          label={t('quota_management.search_label')}
+          placeholder={t('quota_management.search_placeholder')}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          disabled={disableControls}
+        />
+      </div>
 
       <QuotaSection
         config={CLAUDE_CONFIG}
-        files={files}
-        loading={loading}
         disabled={disableControls}
+        searchQuery={debouncedSearch}
+        refreshNonce={refreshNonce}
       />
       <QuotaSection
         config={ANTIGRAVITY_CONFIG}
-        files={files}
-        loading={loading}
         disabled={disableControls}
+        searchQuery={debouncedSearch}
+        refreshNonce={refreshNonce}
       />
       <QuotaSection
         config={CODEX_CONFIG}
-        files={files}
-        loading={loading}
         disabled={disableControls}
+        searchQuery={debouncedSearch}
+        refreshNonce={refreshNonce}
       />
       <QuotaSection
         config={GEMINI_CLI_CONFIG}
-        files={files}
-        loading={loading}
         disabled={disableControls}
+        searchQuery={debouncedSearch}
+        refreshNonce={refreshNonce}
       />
       <QuotaSection
         config={KIMI_CONFIG}
-        files={files}
-        loading={loading}
         disabled={disableControls}
+        searchQuery={debouncedSearch}
+        refreshNonce={refreshNonce}
       />
     </div>
   );

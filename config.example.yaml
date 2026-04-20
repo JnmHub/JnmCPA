@@ -141,6 +141,10 @@ max-retry-interval: 30
 # Default true preserves the current fallback behavior.
 retry-model-not-supported: true
 
+# Whether a 400 thinking / reasoning validation error should continue trying other credentials.
+# Default true preserves the current fallback behavior.
+retry-thinking-validation-error: true
+
 # Error-specific cooldowns in seconds.
 # Leave a field unset to use the built-in default; set to 0 to disable cooldown for that error class.
 # 401 is not listed here because unauthorized auth files are deleted immediately at runtime.

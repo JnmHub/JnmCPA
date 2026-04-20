@@ -1143,9 +1143,22 @@
 }
 
 .cardHeader {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  min-width: 0;
+  padding-right: 64px;
+}
+
+.cardHeaderQuickActions {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
 }
 
 .cardHeaderProbeButton:global(.btn.btn-sm) {
@@ -1155,8 +1168,33 @@
   padding: 0;
   border-radius: 8px;
   flex: 0 0 auto;
-  margin-left: auto;
-  margin-top: 2px;
+}
+
+.quotaModalBody {
+  min-height: 120px;
+}
+
+.quotaModalTitle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+}
+
+.quotaModalTitleText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.quotaModalTitle :global(.btn.btn-sm) {
+  flex: 0 0 auto;
+  min-width: 78px;
 }
 
 .cardSelection {
@@ -1193,6 +1231,7 @@
   gap: 6px;
   flex: 1;
   min-width: 0;
+  overflow: hidden;
 }
 
 .cardBadgeRow {
@@ -1255,12 +1294,13 @@
   font-size: 14px;
   font-weight: 800;
   color: var(--text-primary);
-  word-break: break-all;
-  line-height: 1.4;
-  display: -webkit-box;
+  display: block;
+  width: 100%;
+  min-width: 0;
   overflow: hidden;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.4;
   letter-spacing: -0.01em;
 }
 
