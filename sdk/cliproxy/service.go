@@ -688,10 +688,12 @@ func (s *Service) Run(ctx context.Context) error {
 
 	var watcherWrapper *WatcherWrapper
 	reloadCallback := func(newCfg *config.Config) {
-		previousStrategy := ""
+		previousSelectorKey := ""
+		previousRefreshWorkers := 0
 		s.cfgMu.RLock()
 		if s.cfg != nil {
-			previousStrategy = strings.ToLower(strings.TrimSpace(s.cfg.Routing.Strategy))
+			previousSelectorKey = selectorConfigKey(s.cfg)
+			previousRefreshWorkers = s.cfg.AuthAutoRefreshWorkers
 		}
 		s.cfgMu.RUnlock()
 
@@ -704,26 +706,9 @@ func (s *Service) Run(ctx context.Context) error {
 			return
 		}
 
-		nextStrategy := strings.ToLower(strings.TrimSpace(newCfg.Routing.Strategy))
-		normalizeStrategy := func(strategy string) string {
-			switch strategy {
-			case "fill-first", "fillfirst", "ff":
-				return "fill-first"
-			default:
-				return "round-robin"
-			}
-		}
-		previousStrategy = normalizeStrategy(previousStrategy)
-		nextStrategy = normalizeStrategy(nextStrategy)
-		if s.coreManager != nil && previousStrategy != nextStrategy {
-			var selector coreauth.Selector
-			switch nextStrategy {
-			case "fill-first":
-				selector = &coreauth.FillFirstSelector{}
-			default:
-				selector = &coreauth.RoundRobinSelector{}
-			}
-			s.coreManager.SetSelector(selector)
+		nextSelectorKey := selectorConfigKey(newCfg)
+		if s.coreManager != nil && previousSelectorKey != nextSelectorKey {
+			s.coreManager.SetSelector(newCoreAuthSelector(newCfg))
 		}
 
 		s.applyRetryConfig(newCfg)
@@ -737,6 +722,10 @@ func (s *Service) Run(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.SetConfig(newCfg)
 			s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
+			if previousRefreshWorkers != newCfg.AuthAutoRefreshWorkers {
+				s.coreManager.StartAutoRefresh(context.Background(), 15*time.Minute)
+				log.Infof("core auth auto-refresh restarted after config reload (interval=%s workers=%d)", 15*time.Minute, newCfg.AuthAutoRefreshWorkers)
+			}
 		}
 		s.rebindExecutors()
 		s.syncDirectStoreAuths(context.Background(), watcher.AuthUpdateActionModify)

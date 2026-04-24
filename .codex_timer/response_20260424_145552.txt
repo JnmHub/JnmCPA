@@ -1,0 +1,45 @@
+时间: 2026-04-24 12:44:18
+消息: 好的，在不偏离'OFFICIAL_UPGRADE_EXECUTION_PLAN_2026-04-24.md'的前提开始继续执行
+会话ID: 019d334e-1d8d-7100-8d93-bd171d7953f8
+============================================================
+**结果**
+`OFFICIAL_UPGRADE_EXECUTION_PLAN_2026-04-24.md` 已按主线执行完毕。
+
+- Phase 6 完成：补齐了 Antigravity strict signature validation、bypass 下无效 thinking 剥离、`quota-exceeded.antigravity-credits`、credits hint/fallback retry，并补了对应测试。
+- Phase 7 完成：新增 `enable-gemini-cli-endpoint`，关闭时 `/v1internal:*` 返回 `404`，开启时端点可达；管理接口补上稳定 `auth-index`，重复 `api-key` 删除改为结合 `base-url` 保护。
+- Phase 8 完成：新增 PR 级 CI `.github/workflows/pr-test.yml`，保留现有 `.github/workflows/release-minimal.yml`，并修复了 `internal/authdeletestats` 的日期漂移测试。
+
+**本轮关键改动文件**
+- [config.example.yaml](/Volumes/Jnm/Code/golang/CLIProxyAPI/config.example.yaml)
+- [internal/config/sdk_config.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/config/sdk_config.go)
+- [internal/config/config.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/config/config.go)
+- [internal/cache/signature_cache.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/cache/signature_cache.go)
+- [internal/api/server.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/api/server.go)
+- [sdk/api/handlers/gemini/gemini-cli_handlers.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/sdk/api/handlers/gemini/gemini-cli_handlers.go)
+- [internal/runtime/executor/antigravity_executor.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/runtime/executor/antigravity_executor.go)
+- [internal/translator/antigravity/claude/signature_validation.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/translator/antigravity/claude/signature_validation.go)
+- [sdk/cliproxy/auth/antigravity_credits.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/sdk/cliproxy/auth/antigravity_credits.go)
+- [sdk/cliproxy/auth/conductor.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/sdk/cliproxy/auth/conductor.go)
+- [internal/api/handlers/management/handler.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/api/handlers/management/handler.go)
+- [internal/api/handlers/management/config_auth_index.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/api/handlers/management/config_auth_index.go)
+- [internal/api/handlers/management/config_lists.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/api/handlers/management/config_lists.go)
+- [internal/authdeletestats/manager_test.go](/Volumes/Jnm/Code/golang/CLIProxyAPI/internal/authdeletestats/manager_test.go)
+- [.github/workflows/pr-test.yml](/Volumes/Jnm/Code/golang/CLIProxyAPI/.github/workflows/pr-test.yml)
+
+**简化处理**
+- Gemini CLI 开关采用 server 侧 `404` 包装加 handler 自检，避免做运行时动态重注册路由。
+- `auth-index` 单独抽到独立文件，删除保护直接复用 `api-key + base-url` 组合，不引入新删除协议。
+- `internal/authdeletestats` 的 SQLite 持久化测试改为相对当前时间，消除了 CI 日期漂移导致的误失败。
+
+**验证**
+- `go test ./internal/api ./internal/api/handlers/management ./internal/authdeletestats ./internal/store ./internal/config ./sdk/cliproxy/auth ./sdk/cliproxy ./internal/registry ./sdk/api/handlers/openai ./internal/runtime/executor ./internal/translator/codex/openai/chat-completions ./internal/translator/codex/gemini ./internal/translator/antigravity/claude`
+- `go build ./cmd/server`
+- `npm ci`
+- `npm run type-check`
+- `npm run build`
+
+**剩余风险**
+- 前端依赖在 `npm ci` 后仍提示 11 个 `npm audit` 漏洞，但不影响当前 `type-check` 和 `build`；本计划内未处理依赖升级。
+- 当前工作区还包含前面阶段的未提交改动和新增测试文件；功能与验证已完成，但提交边界还没整理。
+
+plan is ok, 我们这阶段胜利了，请金木查看

@@ -527,3 +527,162 @@ func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *test
 		}
 	}
 }
+
+func TestExtractSessionID_ClaudeCodePriorityOverHeaderAndIdempotency(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("X-Session-ID", "header-session")
+	headers.Set("Idempotency-Key", "idem-session")
+
+	payload := []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`)
+	got := ExtractSessionID(headers, payload, nil)
+	want := "claude:ac980658-63bd-4fb3-97ba-8da64cb1e344"
+	if got != want {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, want)
+	}
+}
+
+func TestExtractSessionID_IdempotencyKeyFallback(t *testing.T) {
+	t.Parallel()
+
+	headers := make(http.Header)
+	headers.Set("Idempotency-Key", "idem-12345")
+
+	got := ExtractSessionID(headers, nil, nil)
+	want := "idempotency:idem-12345"
+	if got != want {
+		t.Fatalf("ExtractSessionID() = %q, want %q", got, want)
+	}
+}
+
+func TestSessionAffinitySelector_SameSessionSameAuth(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&RoundRobinSelector{})
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_ac980658-63bd-4fb3-97ba-8da64cb1e344"}}`),
+	}
+
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+
+	for i := 0; i < 8; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil || got.ID != first.ID {
+			t.Fatalf("Pick() #%d = %v, want auth %q", i, got, first.ID)
+		}
+	}
+}
+
+func TestSessionAffinitySelector_FailoverWhenBoundAuthUnavailable(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &RoundRobinSelector{},
+		TTL:      time.Minute,
+	})
+	defer selector.Stop()
+
+	auths := []*Auth{{ID: "auth-a"}, {ID: "auth-b"}, {ID: "auth-c"}}
+	opts := cliproxyexecutor.Options{
+		OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_failover-123"}}`),
+	}
+
+	first, err := selector.Pick(context.Background(), "claude", "claude-3", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() initial error = %v", err)
+	}
+
+	reduced := make([]*Auth, 0, len(auths)-1)
+	for _, auth := range auths {
+		if auth.ID != first.ID {
+			reduced = append(reduced, auth)
+		}
+	}
+
+	second, err := selector.Pick(context.Background(), "claude", "claude-3", opts, reduced)
+	if err != nil {
+		t.Fatalf("Pick() failover error = %v", err)
+	}
+	if second == nil {
+		t.Fatalf("Pick() failover auth = nil")
+	}
+	if second.ID == first.ID {
+		t.Fatalf("Pick() failover kept unavailable auth %q", first.ID)
+	}
+
+	for i := 0; i < 5; i++ {
+		got, err := selector.Pick(context.Background(), "claude", "claude-3", opts, reduced)
+		if err != nil {
+			t.Fatalf("Pick() #%d after failover error = %v", i, err)
+		}
+		if got == nil || got.ID != second.ID {
+			t.Fatalf("Pick() #%d after failover = %v, want %q", i, got, second.ID)
+		}
+	}
+}
+
+func TestSessionAffinitySelector_PreservesPriorityWithinAvailableSet(t *testing.T) {
+	t.Parallel()
+
+	selector := NewSessionAffinitySelector(&FillFirstSelector{})
+	defer selector.Stop()
+
+	auths := []*Auth{
+		{ID: "low", Attributes: map[string]string{"priority": "1"}},
+		{ID: "high", Attributes: map[string]string{"priority": "9"}},
+	}
+	opts := cliproxyexecutor.Options{
+		Headers: make(http.Header),
+	}
+	opts.Headers.Set("X-Session-ID", "priority-session")
+
+	got, err := selector.Pick(context.Background(), "codex", "gpt-5", opts, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "high" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "high")
+	}
+}
+
+func TestSessionCache_GetAndRefresh(t *testing.T) {
+	t.Parallel()
+
+	cache := NewSessionCache(100 * time.Millisecond)
+	defer cache.Stop()
+
+	cache.Set("session-1", "auth-1")
+
+	got, ok := cache.GetAndRefresh("session-1")
+	if !ok || got != "auth-1" {
+		t.Fatalf("GetAndRefresh() = %q, %v, want auth-1, true", got, ok)
+	}
+
+	time.Sleep(60 * time.Millisecond)
+	got, ok = cache.GetAndRefresh("session-1")
+	if !ok || got != "auth-1" {
+		t.Fatalf("GetAndRefresh() after refresh = %q, %v, want auth-1, true", got, ok)
+	}
+
+	time.Sleep(110 * time.Millisecond)
+	got, ok = cache.GetAndRefresh("session-1")
+	if ok {
+		t.Fatalf("GetAndRefresh() after expiry = %q, %v, want empty, false", got, ok)
+	}
+}

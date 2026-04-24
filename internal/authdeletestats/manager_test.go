@@ -92,7 +92,7 @@ func TestManagerOnResultOnlyRecordsAutoDeleteStatuses(t *testing.T) {
 
 func TestManagerConfigureSQLitePersistsMinuteBuckets(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "auth-delete-stats.db")
-	base := time.Date(2026, 4, 16, 12, 34, 0, 0, time.UTC)
+	base := time.Now().UTC().Truncate(time.Minute)
 
 	manager := NewManager(24*time.Hour, 512)
 	manager.Record(Event{Timestamp: base, StatusCode: StatusUnauthorized})

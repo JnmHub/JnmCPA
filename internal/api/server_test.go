@@ -12,6 +12,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -205,6 +206,87 @@ func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {
 	for _, entry := range configEntries {
 		if strings.HasPrefix(entry.Name(), "error-") && strings.HasSuffix(entry.Name(), ".log") {
 			t.Fatalf("unexpected forced error log in config dir %s", configLogsDir)
+		}
+	}
+}
+
+func TestLijinmuRouteServesManagementPanelWithConfiguredTitle(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.RemoteManagement.PanelTitle = "金木控制台"
+
+	staticDir := managementasset.StaticDir(server.configFilePath)
+	if err := os.MkdirAll(staticDir, 0o755); err != nil {
+		t.Fatalf("failed to create static dir: %v", err)
+	}
+
+	panelHTML := `<!doctype html>
+<html>
+<head>
+<title>Old Title</title>
+<script>document.title="Old Title";</script>
+</head>
+<body>panel</body>
+</html>`
+	panelPath := filepath.Join(staticDir, managementasset.ManagementFileName)
+	if err := os.WriteFile(panelPath, []byte(panelHTML), 0o644); err != nil {
+		t.Fatalf("failed to write management panel: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/lijinmu", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("unexpected content type: %q", got)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "<title>金木控制台</title>") {
+		t.Fatalf("response body missing updated title: %s", body)
+	}
+	if !strings.Contains(body, `document.title="金木控制台";`) {
+		t.Fatalf("response body missing updated document.title: %s", body)
+	}
+}
+
+func TestImageRoutesAreRegistered(t *testing.T) {
+	server := newTestServer(t)
+
+	tests := []struct {
+		name        string
+		path        string
+		contentType string
+		body        string
+	}{
+		{
+			name:        "generations",
+			path:        "/v1/images/generations",
+			contentType: "application/json",
+			body:        `{}`,
+		},
+		{
+			name:        "edits",
+			path:        "/v1/images/edits",
+			contentType: "application/json",
+			body:        `{}`,
+		},
+	}
+
+	for _, tc := range tests {
+		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+		req.Header.Set("Authorization", "Bearer test-key")
+		req.Header.Set("Content-Type", tc.contentType)
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code == http.StatusNotFound {
+			t.Fatalf("%s route not registered", tc.path)
+		}
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("unexpected status for %s: got %d body=%s", tc.path, rr.Code, rr.Body.String())
 		}
 	}
 }

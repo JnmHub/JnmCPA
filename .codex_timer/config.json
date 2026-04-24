@@ -1,0 +1,15 @@
+{
+  "schedule_mode": "continuous",
+  "continuous_delay_seconds": 3,
+  "sandbox_mode": "danger-full-access",
+  "approval_policy": "never",
+  "trust_level": "trusted",
+  "stop_keywords": [
+    "plan is ok",
+    "我们这阶段胜利了，请金木查看"
+  ],
+  "preset_message": "好的，在不偏离'OFFICIAL_UPGRADE_EXECUTION_PLAN_2026-04-24.md'的前提开始继续执行",
+  "message_mode": "preset",
+  "session_id": "019d334e-1d8d-7100-8d93-bd171d7953f8",
+  "last_message": "好的，在不偏离'OFFICIAL_UPGRADE_EXECUTION_PLAN_2026-04-24.md'的前提开始继续执行"
+}
