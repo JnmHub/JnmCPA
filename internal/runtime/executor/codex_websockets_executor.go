@@ -300,6 +300,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 	}
 
+	events := make([][]byte, 0, 16)
 	for {
 		if ctx != nil && ctx.Err() != nil {
 			return resp, ctx.Err()
@@ -336,13 +337,18 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 		}
 
 		payload = normalizeCodexWebsocketCompletion(payload)
+		events = append(events, append([]byte(nil), payload...))
 		eventType := gjson.GetBytes(payload, "type").String()
 		if eventType == "response.completed" {
-			if detail, ok := parseCodexUsage(payload); ok {
+			aggregated, ok := aggregateCodexNonStreamCompletion(events)
+			if !ok {
+				return resp, statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+			}
+			if detail, ok := parseCodexUsage(aggregated); ok {
 				reporter.publish(ctx, detail)
 			}
 			var param any
-			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, payload, &param)
+			out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, aggregated, &param)
 			resp = cliproxyexecutor.Response{Payload: out}
 			return resp, nil
 		}
